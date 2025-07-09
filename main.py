@@ -1,17 +1,3 @@
-That crash indicates a problem with how the background task is running in Railway's environment. A crash after a specific time like 43 seconds often points to the platform terminating the process due to either a spike in resource usage or a failed health check.
-
-The previous code tried to delete messages from all channels at the same time, which can cause a sudden memory spike and lead to a crash on services like Railway. The fix is to process the channels one by one and make the background task more independent from the initial command.
-
-This new version is significantly more robust and stable for a Railway deployment. It will:
-
-1.  Process channels **sequentially** to keep memory usage low and stable.
-2.  Use a **webhook** for the final response, which is the most reliable way to communicate after a long task.
-3.  Create a completely **independent background task** that doesn't rely on the initial command context, preventing it from crashing if the connection is interrupted.
-
-Here is the complete, updated `main.py`.
-
------
-
 ### Complete `main.py` with Final Fix
 
 ```python
