@@ -1,4 +1,3 @@
-
 import discord
 import os
 import random
@@ -52,6 +51,9 @@ class MangodiaBot(commands.Bot):
         
         # Load G25 cog
         await self.load_extension("g25_cog")
+        
+        # Start the keep-alive task
+        self.loop.create_task(self.keep_alive())
         
         # Sync commands
         try:
@@ -234,6 +236,19 @@ class MangodiaBot(commands.Bot):
                     logger.warning(f"Could not give role {role.name} to {member.name} - permissions missing.")
                 except Exception as e:
                     logger.error(f"Error giving role {role.name} to {member.name}: {e}")
+    
+    async def keep_alive(self):
+        """A background task to keep the database connection active."""
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                async with self.db_pool.acquire() as conn:
+                    await conn.execute("SELECT 1;")
+                logger.info("Database keep-alive ping successful.")
+            except Exception as e:
+                logger.error(f"Keep-alive ping failed: {e}")
+            
+            await asyncio.sleep(600)  # Sleep for 10 minutes (600 seconds)
     
     # --- Bot Events ---
     
