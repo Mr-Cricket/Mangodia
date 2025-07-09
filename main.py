@@ -446,17 +446,15 @@ async def setup_command(interaction: discord.Interaction):
 
         faq_embed.set_footer(text="Still have questions? Don't hesitate to ask in the general chat! 💬")
 
-        # Send all embeds and add reactions
-        rules_message = await interaction.followup.send(embed=rules_embed)
-        await rules_message.add_reaction("📜")
+        # Send all embeds in one message
+        main_message = await interaction.channel.send(embeds=[rules_embed, gif_embed, faq_embed])
         
-        gif_message = await interaction.followup.send(embed=gif_embed)
-        await gif_message.add_reaction("🏃‍♂️")
-        
-        faq_message = await interaction.followup.send(embed=faq_embed)
-        await faq_message.add_reaction("✅")
+        # Add reactions to that single message
+        await main_message.add_reaction("📜")
+        await main_message.add_reaction("🏃‍♂️")
+        await main_message.add_reaction("✅")
 
-        await interaction.followup.send("✅ **Setup Complete!** All embeds have been posted successfully.", ephemeral=True)
+        await interaction.followup.send("✅ **Setup Complete!**", ephemeral=True)
 
     except Exception as e:
         logger.error(f"Error in setup command: {e}")
