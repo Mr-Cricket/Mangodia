@@ -1,1 +1,6 @@
 discord.py
+pandas
+numpy
+scikit-learn
+matplotlib
+asyncpg
