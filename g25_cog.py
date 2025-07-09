@@ -8,6 +8,8 @@ import io
 import json
 import os
 import asyncpg
+from discord import app_commands
+from typing import Literal
 
 def calculate_distance(coords1, coords2):
     return np.linalg.norm(np.array(coords1) - np.array(coords2))
@@ -22,6 +24,19 @@ def parse_g25_coords(coord_string: str):
         return name, coords
     except (ValueError, IndexError):
         return None, None
+
+def parse_g25_multi(coord_block: str):
+    """Parses a block of G25 coordinates into a DataFrame."""
+    lines = coord_block.strip().split('\n')
+    data = {}
+    for line in lines:
+        if not line.strip():
+            continue
+        name, coords = parse_g25_coords(line)
+        if name and coords:
+            data[name] = coords
+    return pd.DataFrame.from_dict(data, orient='index', columns=[f'PC{i+1}' for i in range(25)])
+
 
 class G25Commands(commands.Cog, name="G25"):
     """Commands for Global 25 genetic ancestry analysis."""
@@ -49,9 +64,11 @@ class G25Commands(commands.Cog, name="G25"):
             async with self.db_pool.acquire() as connection:
                 await connection.execute('''
                     CREATE TABLE IF NOT EXISTS g25_user_coordinates (
-                        user_id BIGINT PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
                         sample_name TEXT NOT NULL,
-                        coordinates JSONB NOT NULL
+                        sample_type TEXT NOT NULL,
+                        coordinates JSONB NOT NULL,
+                        PRIMARY KEY (user_id, sample_name)
                     );
                 ''')
             print("G25 Cog: Successfully connected to PostgreSQL database.")
@@ -62,16 +79,21 @@ class G25Commands(commands.Cog, name="G25"):
         if self.db_pool:
             self.bot.loop.create_task(self.db_pool.close())
 
-    async def get_user_coords(self, user_id):
+    async def get_user_coords(self, user_id, sample_name):
         if not self.db_pool: return None
         async with self.db_pool.acquire() as connection:
-            record = await connection.fetchrow('SELECT sample_name, coordinates FROM g25_user_coordinates WHERE user_id = $1', user_id)
+            record = await connection.fetchrow('SELECT sample_name, coordinates FROM g25_user_coordinates WHERE user_id = $1 AND sample_name = $2', user_id, sample_name)
         return {'name': record['sample_name'], 'coords': json.loads(record['coordinates'])} if record else None
 
-    g25 = discord.app_commands.Group(name="g25", description="Commands for G25 genetic analysis.")
+    g25 = app_commands.Group(name="g25", description="Commands for G25 genetic analysis.")
 
-    @g25.command(name='addcoords', description='Adds or updates your G25 coordinates.')
-    async def add_coords(self, interaction: discord.Interaction, g25_string: str = None, attachment: discord.Attachment = None):
+    @g25.command(name='addcoords', description='Adds or updates a G25 coordinate sample.')
+    @app_commands.describe(
+        sample_type="Is this your personal sample for the leaderboard, or just a test sample?",
+        g25_string="Your coordinates as a comma-separated string.",
+        attachment="Your coordinates as a .csv or .txt file."
+    )
+    async def add_coords(self, interaction: discord.Interaction, sample_type: Literal['Personal', 'Sample'], g25_string: str = None, attachment: discord.Attachment = None):
         await interaction.response.defer(ephemeral=True)
         if not self.db_pool:
             await interaction.followup.send("Database connection is not available. Please contact the administrator.")
@@ -90,99 +112,180 @@ class G25Commands(commands.Cog, name="G25"):
 
         name, coords = parse_g25_coords(g25_string)
         if not name or not coords:
-            await interaction.followup.send("Invalid G25 format. Please use: `YourName,coord1,coord2,...,coord25`")
+            await interaction.followup.send("Invalid G25 format. Please use: `SampleName,coord1,coord2,...,coord25`")
             return
 
         async with self.db_pool.acquire() as connection:
             await connection.execute('''
-                INSERT INTO g25_user_coordinates (user_id, sample_name, coordinates) VALUES ($1, $2, $3)
-                ON CONFLICT (user_id) DO UPDATE SET sample_name = EXCLUDED.sample_name, coordinates = EXCLUDED.coordinates;
-            ''', interaction.user.id, name, json.dumps(coords))
+                INSERT INTO g25_user_coordinates (user_id, sample_name, sample_type, coordinates) VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, sample_name) DO UPDATE 
+                SET sample_type = EXCLUDED.sample_type, coordinates = EXCLUDED.coordinates;
+            ''', interaction.user.id, name, sample_type, json.dumps(coords))
         
-        await interaction.followup.send(f"Coordinates for '{name}' added successfully for user {interaction.user.mention}.")
+        await interaction.followup.send(f"Coordinates for sample '{name}' saved as type '{sample_type}'.")
 
-    @g25.command(name='distance', description='Calculates genetic distance to a population.')
-    async def distance(self, interaction: discord.Interaction, population_name: str):
+    @g25.command(name='model', description='Model a sample using source populations.')
+    @app_commands.describe(
+        target_sample_name="The name of your saved sample to model.",
+        source_populations="Comma-separated list of populations from the main data file.",
+        custom_sources_string="Custom source populations as a block of text.",
+        custom_sources_file="A .txt or .csv file with custom source populations."
+    )
+    async def model(self, interaction: discord.Interaction, target_sample_name: str, source_populations: str = None, custom_sources_string: str = None, custom_sources_file: discord.Attachment = None):
         await interaction.response.defer()
-        user_info = await self.get_user_coords(interaction.user.id)
-        if not user_info:
-            await interaction.followup.send("You need to add your coordinates first using `/g25 addcoords`.")
-            return
-        if self.g25_data is None:
-            await interaction.followup.send("G25 population data is not loaded. Please contact the bot administrator.")
+
+        target_info = await self.get_user_coords(interaction.user.id, target_sample_name)
+        if not target_info:
+            await interaction.followup.send(f"You don't have a saved sample named '{target_sample_name}'.")
             return
 
-        try:
-            pop_coords = self.g25_data.loc[population_name].values
-            dist = calculate_distance(user_info['coords'], pop_coords)
-            await interaction.followup.send(f"Genetic distance between **{user_info['name']}** and **{population_name}**: `{dist:.4f}`")
-        except KeyError:
-            await interaction.followup.send(f"Population '{population_name}' not found.")
+        target_coords = np.array(target_info['coords'])
+        source_df = pd.DataFrame()
 
-    @g25.command(name='pca', description='Generates a PCA plot of your coordinates.')
-    async def pca(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        user_info = await self.get_user_coords(interaction.user.id)
-        if not user_info:
-            await interaction.followup.send("You need to add your coordinates first using `/g25 addcoords`.")
-            return
-        if self.g25_data is None:
-            await interaction.followup.send("G25 population data is not loaded. Please contact the bot administrator.")
+        if custom_sources_file:
+            try:
+                content = (await custom_sources_file.read()).decode('utf-8')
+                source_df = parse_g25_multi(content)
+            except Exception as e:
+                await interaction.followup.send(f"Error reading custom source file: {e}")
+                return
+        elif custom_sources_string:
+            source_df = parse_g25_multi(custom_sources_string)
+        elif source_populations:
+            if self.g25_data is None:
+                await interaction.followup.send("G25 population data is not loaded.")
+                return
+            pop_names = [name.strip() for name in source_populations.split(',')]
+            try:
+                source_df = self.g25_data.loc[pop_names]
+            except KeyError as e:
+                await interaction.followup.send(f"Population '{e.args[0]}' not found. Check spelling or use `/g25 search`.")
+                return
+        else:
+            await interaction.followup.send("You must provide one source: `source_populations`, `custom_sources_string`, or `custom_sources_file`.")
             return
 
-        user_name, user_coords = user_info['name'], np.array(user_info['coords'])
-        full_data = self.g25_data.append(pd.Series(user_coords, index=self.g25_data.columns, name=user_name))
+        if source_df.empty or len(source_df) < 2:
+            await interaction.followup.send("Could not find at least 2 valid source populations to create a model.")
+            return
+
+        source_matrix = source_df.values.T
+        result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
         
-        pca_model = PCA(n_components=2)
-        principal_components = pca_model.fit_transform(full_data)
-        pca_df = pd.DataFrame(data=principal_components, columns=['PC1', 'PC2'], index=full_data.index)
+        proportions = result
+        proportions[proportions < 0] = 0
+        if total := np.sum(proportions):
+            proportions = (proportions / total) * 100
 
-        plt.style.use('dark_background')
-        fig, ax = plt.subplots(figsize=(12, 8))
-        ax.scatter(pca_df['PC1'], pca_df['PC2'], color='gray', s=10, label='Global Populations')
-        user_pc = pca_df.loc[user_name]
-        ax.scatter(user_pc['PC1'], user_pc['PC2'], color='red', s=100, label=user_name, edgecolors='white')
-        ax.set_xlabel(f"PC1 ({pca_model.explained_variance_ratio_[0]*100:.2f}%)")
-        ax.set_ylabel(f"PC2 ({pca_model.explained_variance_ratio_[1]*100:.2f}%)")
-        ax.set_title("G25 PCA Plot")
-        ax.legend()
-        ax.grid(True, linestyle='--', alpha=0.3)
+        fitted_coords = np.dot(source_matrix, result)
+        distance = calculate_distance(target_coords, fitted_coords)
 
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png')
-        buf.seek(0)
-        plt.close()
+        embed = discord.Embed(title=f"Admixture Model for {target_info['name']}", color=discord.Color.blue())
+        fit_message = "Good Fit (< 0.03)" if distance < 0.03 else "Okay Fit (< 0.05)" if distance < 0.05 else "Poor Fit (>= 0.05)"
+        embed.description = f"**Distance (Fit):** `{distance:.4f}` ({fit_message})\n\n**Admixture Proportions:**"
+        
+        sorted_results = sorted(zip(source_df.index, proportions), key=lambda x: x[1], reverse=True)
+        
+        for name, percent in sorted_results:
+            if percent > 0.01:
+                embed.add_field(name=name, value=f"{percent:.2f}%", inline=True)
 
-        await interaction.followup.send(file=discord.File(buf, 'pca_plot.png'))
+        await interaction.followup.send(embed=embed)
 
-    @g25.command(name='leaderboard', description='Shows who is most similar to a population.')
-    async def g25_leaderboard(self, interaction: discord.Interaction, population_name: str):
+
+    @g25.command(name='leaderboard', description='Shows who is most similar to a population or custom sample.')
+    @app_commands.describe(
+        population_name="[EITHER] The name of the population from the data file.",
+        custom_target_string="[OR] A custom target sample as a string.",
+        custom_target_file="[OR] A custom target sample as a file."
+    )
+    async def g25_leaderboard(self, interaction: discord.Interaction, population_name: str = None, custom_target_string: str = None, custom_target_file: discord.Attachment = None):
         await interaction.response.defer()
-        if self.g25_data is None or not self.db_pool:
-            await interaction.followup.send("Bot is not ready. Data or database is unavailable.")
+
+        # Determine the target coordinates
+        target_coords = None
+        target_name = ""
+        
+        # Check that only one target type is provided
+        if sum(p is not None for p in [population_name, custom_target_string, custom_target_file]) != 1:
+            await interaction.followup.send("Please provide exactly one target: `population_name`, `custom_target_string`, or `custom_target_file`.")
             return
 
-        try:
-            pop_coords = self.g25_data.loc[population_name].values
-        except KeyError:
-            await interaction.followup.send(f"Population '{population_name}' not found.")
-            return
+        if population_name:
+            if self.g25_data is None:
+                await interaction.followup.send("G25 population data is not loaded.")
+                return
+            try:
+                target_coords = self.g25_data.loc[population_name].values
+                target_name = population_name
+            except KeyError:
+                await interaction.followup.send(f"Population '{population_name}' not found.")
+                return
+        elif custom_target_string:
+            target_name, target_coords = parse_g25_coords(custom_target_string)
+            if not target_name:
+                await interaction.followup.send("Invalid format for `custom_target_string`.")
+                return
+        elif custom_target_file:
+            try:
+                content = (await custom_target_file.read()).decode('utf-8')
+                target_name, target_coords = parse_g25_coords(content)
+                if not target_name:
+                    await interaction.followup.send("Invalid format for the custom target file.")
+                    return
+            except Exception as e:
+                await interaction.followup.send(f"Error reading custom target file: {e}")
+                return
 
+        # Fetch personal samples and calculate distances
         async with self.db_pool.acquire() as connection:
-            all_users = await connection.fetch('SELECT sample_name, coordinates FROM g25_user_coordinates')
+            personal_samples = await connection.fetch("SELECT sample_name, coordinates FROM g25_user_coordinates WHERE sample_type = 'Personal'")
 
-        if not all_users:
-            await interaction.followup.send("No user coordinates have been added yet.")
+        if not personal_samples:
+            await interaction.followup.send("No 'Personal' samples have been added for the leaderboard yet.")
             return
 
         distances = sorted(
-            [(r['sample_name'], calculate_distance(json.loads(r['coordinates']), pop_coords)) for r in all_users],
+            [(r['sample_name'], calculate_distance(json.loads(r['coordinates']), target_coords)) for r in personal_samples],
             key=lambda x: x[1]
         )
 
-        embed = discord.Embed(title=f"G25 Leaderboard: Closest to {population_name}", color=discord.Color.gold())
+        embed = discord.Embed(title=f"G25 Leaderboard: Closest to {target_name}", color=discord.Color.gold())
         embed.description = "\n".join([f"{i+1}. **{name}** - Distance: `{dist:.4f}`" for i, (name, dist) in enumerate(distances[:10])])
         await interaction.followup.send(embed=embed)
+
+    @g25.command(name='search', description='Search for available population names.')
+    @app_commands.describe(query="The name (or part of the name) to search for.")
+    async def search_population(self, interaction: discord.Interaction, query: str):
+        await interaction.response.defer(ephemeral=True)
+        if self.g25_data is None:
+            await interaction.followup.send("G25 population data is not loaded.")
+            return
+
+        matches = [pop for pop in self.g25_data.index if query.lower() in pop.lower()]
+        if not matches:
+            await interaction.followup.send(f"No populations found matching '{query}'.")
+            return
+
+        response_text = "Found the following matches:\n" + "\n".join(matches[:25])
+        if len(response_text) > 1990: response_text = response_text[:1980] + "\n..."
+        await interaction.followup.send(f"```{response_text}```")
+
+    @g25.command(name='listall', description='Sends you a private file with all available population names.')
+    async def list_all_populations(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if self.g25_data is None:
+            await interaction.followup.send("G25 population data is not loaded.")
+            return
+
+        try:
+            all_pops_string = "\n".join(self.g25_data.index)
+            file_buffer = io.BytesIO(all_pops_string.encode('utf-8'))
+            await interaction.followup.send("Here is the full list of available populations.", file=discord.File(file_buffer, "population_list.txt"))
+        except Exception as e:
+            logger.error(f"Error creating population list file: {e}")
+            await interaction.followup.send("Sorry, I couldn't generate the population list.")
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(G25Commands(bot))
