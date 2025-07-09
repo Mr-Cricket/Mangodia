@@ -6,6 +6,7 @@ import os
 import random
 import logging
 import json
+import asyncio
 from discord import app_commands
 from discord.utils import get
 
@@ -471,51 +472,69 @@ async def leaderboard_command(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
-# --- NEW ADMIN COMMAND ---
+# --- NEW ADMIN COMMAND (ROBUST VERSION) ---
+async def background_purge_and_leave(guild_to_leave: discord.Guild, interaction: discord.Interaction):
+    """This function runs in the background to avoid timeouts."""
+    logger.info(f"[BG Task] Starting message purge in {guild_to_leave.name}...")
+    
+    # Create a list of tasks for purging each channel
+    purge_tasks = []
+    for channel in guild_to_leave.text_channels:
+        if channel.permissions_for(guild_to_leave.me).manage_messages:
+            # Add the purge operation as a task to be run concurrently
+            purge_tasks.append(channel.purge(limit=500, check=lambda m: m.author == client.user, bulk=True))
+    
+    # Run all purge tasks concurrently
+    if purge_tasks:
+        # `return_exceptions=True` ensures that even if one channel fails, the others continue
+        await asyncio.gather(*purge_tasks, return_exceptions=True)
+        logger.info(f"[BG Task] Finished purging all channels in {guild_to_leave.name}.")
+    else:
+        logger.warning(f"[BG Task] No channels to purge in {guild_to_leave.name}.")
+
+    try:
+        # Finally, leave the server
+        logger.info(f"[BG Task] Leaving guild {guild_to_leave.name}.")
+        await guild_to_leave.leave()
+        
+        # Send a final confirmation message
+        await interaction.followup.send(f"✅ Successfully deleted messages and left **{guild_to_leave.name}**.")
+    except Exception as e:
+        logger.error(f"[BG Task] Failed to leave guild or followup: {e}")
+        await interaction.followup.send(f"❌ Finished purging, but failed to leave the server: {e}")
+
 @tree.command(name="admin_leave_server", description="[ADMIN] Deletes the bot's messages and leaves the server.")
 @app_commands.describe(server_id="The ID of the server to leave.")
-@app_commands.default_permissions(administrator=True) # Only admins can see/use this by default
+@app_commands.default_permissions(administrator=True)
 async def admin_leave_server(interaction: discord.Interaction, server_id: str):
     """Command for the bot owner to make the bot leave a specific server."""
     # Security check: Ensure the person using the command is the bot's owner
     if not await client.is_owner(interaction.user):
         await interaction.response.send_message("❌ This is a bot owner only command.", ephemeral=True)
         return
+    
+    await interaction.response.defer(ephemeral=True, thinking=True)
 
     try:
-        guild_to_leave = client.get_guild(int(server_id))
+        guild_id = int(server_id)
+        guild_to_leave = client.get_guild(guild_id)
+
         if not guild_to_leave:
-            await interaction.response.send_message(f"❌ Cannot find a server with the ID: `{server_id}`.", ephemeral=True)
+            await interaction.followup.send(f"❌ Cannot find a server with the ID: `{server_id}`. I might not be in it.")
             return
 
-        await interaction.response.send_message(f"✅ Preparing to leave **{guild_to_leave.name}** (`{server_id}`)... This may take a moment.", ephemeral=True)
+        # Let the admin know the background task has started
+        await interaction.followup.send(f"✅ Acknowledged. Starting purge and leave for **{guild_to_leave.name}** in the background. You will be notified upon completion.")
 
-        # Purge messages from all text channels
-        logger.info(f"Starting message purge in {guild_to_leave.name}...")
-        for channel in guild_to_leave.text_channels:
-            if channel.permissions_for(guild_to_leave.me).read_messages and channel.permissions_for(guild_to_leave.me).manage_messages:
-                try:
-                    # The purge command is efficient for bulk deletion
-                    await channel.purge(limit=500, check=lambda m: m.author == client.user, bulk=True)
-                    logger.info(f"Purged messages from #{channel.name}.")
-                except discord.Forbidden:
-                    logger.warning(f"Could not purge messages in #{channel.name} due to missing permissions.")
-                except Exception as e:
-                    logger.error(f"Error purging messages in #{channel.name}: {e}")
-        
-        # Finally, leave the server
-        logger.info(f"Purge complete. Leaving guild {guild_to_leave.name}.")
-        await guild_to_leave.leave()
-        
-        # Follow-up message to the admin who ran the command
-        await interaction.followup.send(f"✅ Successfully deleted messages and left **{guild_to_leave.name}**.", ephemeral=True)
+        # Create and start the background task
+        client.loop.create_task(background_purge_and_leave(guild_to_leave, interaction))
 
     except ValueError:
-        await interaction.response.send_message("❌ Invalid Server ID format. Please provide a valid integer ID.", ephemeral=True)
+        await interaction.followup.send("❌ Invalid Server ID format. Please provide a valid integer ID.")
     except Exception as e:
-        logger.error(f"An error occurred in admin_leave_server: {e}")
-        await interaction.followup.send(f"❌ An unexpected error occurred: {e}", ephemeral=True)
-
+        logger.error(f"An error occurred launching admin_leave_server task: {e}")
+        await interaction.followup.send(f"❌ An unexpected error occurred while starting the task: {e}")
+        
 # --- Run Bot ---
 if __name__ == "__main__":
     if BOT_TOKEN:
@@ -527,3 +546,4 @@ if __name__ == "__main__":
             logger.error(f"❌ Error starting bot: {e}")
     else:
         logger.error("❌ DISCORD_TOKEN not found in environment variables.")
+```
