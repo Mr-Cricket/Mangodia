@@ -1,5 +1,3 @@
-# main.py
-# Mangodia Discord Bot - Enhanced Version with Invite Tracking
 
 import discord
 import os
@@ -7,6 +5,7 @@ import random
 import logging
 import asyncpg
 import asyncio
+from discord.ext import commands
 from discord import app_commands
 
 # --- Configuration ---
@@ -30,7 +29,7 @@ subway_surfers_gifs = [
     'https://media4.giphy.com/media/fYShjUkJAXW1YO6cNA/giphy.gif'
 ]
 
-class MangodiaBot(discord.Client):
+class MangodiaBot(commands.Bot):
     def __init__(self):
         # Initialize intents for tracking members, guilds, and invites
         intents = discord.Intents.default()
@@ -38,10 +37,7 @@ class MangodiaBot(discord.Client):
         intents.members = True
         intents.invites = True
         
-        super().__init__(intents=intents)
-        
-        # Initialize command tree
-        self.tree = app_commands.CommandTree(self)
+        super().__init__(command_prefix='!', intents=intents)
         
         # In-memory cache for invites
         self.invites_cache = {}
