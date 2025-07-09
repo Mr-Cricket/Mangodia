@@ -1,3 +1,20 @@
+That crash indicates a problem with how the background task is running in Railway's environment. A crash after a specific time like 43 seconds often points to the platform terminating the process due to either a spike in resource usage or a failed health check.
+
+The previous code tried to delete messages from all channels at the same time, which can cause a sudden memory spike and lead to a crash on services like Railway. The fix is to process the channels one by one and make the background task more independent from the initial command.
+
+This new version is significantly more robust and stable for a Railway deployment. It will:
+
+1.  Process channels **sequentially** to keep memory usage low and stable.
+2.  Use a **webhook** for the final response, which is the most reliable way to communicate after a long task.
+3.  Create a completely **independent background task** that doesn't rely on the initial command context, preventing it from crashing if the connection is interrupted.
+
+Here is the complete, updated `main.py`.
+
+-----
+
+### Complete `main.py` with Final Fix
+
+```python
 # main.py
 # Mangodia Discord Bot - Enhanced Version with Invite Tracking
 
@@ -377,4 +394,182 @@ async def remove_reward(interaction: discord.Interaction, role: discord.Role):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
-        await interaction.response.send_message("❌ That role is not currently set as a reward
+        await interaction.response.send_message("❌ That role is not currently set as a reward.", ephemeral=True)
+
+@tree.command(name="rewards", description="View all current invite rewards.")
+async def rewards_command(interaction: discord.Interaction):
+    """Command to view all current invite rewards."""
+    ensure_guild_in_db(interaction.guild.id)
+    guild_id_str = str(interaction.guild.id)
+    rewards = db[guild_id_str]["rewards"]
+
+    if not rewards:
+        await interaction.response.send_message("❌ No invite rewards are currently set up.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🏆 Invite Rewards",
+        description="Here are all the current invite rewards:",
+        color=0xFFD700
+    )
+
+    for role_id, required_invites in sorted(rewards.items(), key=lambda x: x[1]):
+        role = interaction.guild.get_role(int(role_id))
+        if role:
+            embed.add_field(
+                name=f"**{role.name}**",
+                value=f"{required_invites} invites",
+                inline=True
+            )
+
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="invites", description="Check how many invites a user has.")
+@app_commands.describe(user="The user to check (optional, defaults to you).")
+async def invites_command(interaction: discord.Interaction, user: discord.Member = None):
+    """Command to check a user's invites."""
+    target_user = user or interaction.user
+    ensure_user_in_db(interaction.guild.id, target_user.id)
+    
+    guild_id_str = str(interaction.guild.id)
+    user_id_str = str(target_user.id)
+
+    user_data = db[guild_id_str]["users"][user_id_str]
+    total_invites = user_data["invites"] - user_data["leaves"]
+
+    embed = discord.Embed(
+        title=f"📊 Invite Stats for {target_user.display_name}",
+        description=f"**Total Invites:** {total_invites}",
+        color=target_user.color or 0x2F3136
+    )
+    embed.set_thumbnail(url=target_user.display_avatar.url)
+    embed.add_field(name="✅ Successful Invites", value=user_data["invites"], inline=True)
+    embed.add_field(name="❌ Left Members", value=user_data["leaves"], inline=True)
+    embed.add_field(name="📈 Net Invites", value=total_invites, inline=True)
+
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="leaderboard", description="View the top inviters in the server.")
+async def leaderboard_command(interaction: discord.Interaction):
+    """Command to view the invite leaderboard."""
+    ensure_guild_in_db(interaction.guild.id)
+    guild_id_str = str(interaction.guild.id)
+    users = db[guild_id_str]["users"]
+
+    if not users:
+        await interaction.response.send_message("❌ No invite data available yet.", ephemeral=True)
+        return
+
+    # Sort users by total invites (invites - leaves)
+    sorted_users = sorted(
+        users.items(),
+        key=lambda x: x[1]["invites"] - x[1]["leaves"],
+        reverse=True
+    )[:10]  # Top 10
+
+    embed = discord.Embed(
+        title="🏆 Invite Leaderboard",
+        description="Top inviters in the server:",
+        color=0xFFD700
+    )
+
+    for i, (user_id, data) in enumerate(sorted_users, 1):
+        member = interaction.guild.get_member(int(user_id))
+        if member:
+            total_invites = data["invites"] - data["leaves"]
+            if total_invites > 0:  # Only show users with positive invites
+                embed.add_field(
+                    name=f"{i}. {member.display_name}",
+                    value=f"{total_invites} invites",
+                    inline=False
+                )
+
+    if not embed.fields:
+        embed.description = "No one has any invites yet!"
+
+    await interaction.response.send_message(embed=embed)
+
+# --- MOST ROBUST ADMIN COMMAND FOR RAILWAY ---
+async def background_purge_and_leave(guild_id: int, webhook: discord.Webhook, initial_user_id: int):
+    """
+    This function runs completely in the background, decoupled from the initial interaction.
+    It uses a webhook to report its final status.
+    """
+    guild_to_leave = client.get_guild(guild_id)
+    if not guild_to_leave:
+        logger.error(f"[BG Task] Could not find guild with ID {guild_id}. Aborting.")
+        await webhook.send(f"❌ **Error:** The bot could no longer find server `{guild_id}` when the task started.")
+        return
+
+    logger.info(f"[BG Task] Starting sequential message purge in {guild_to_leave.name}...")
+    
+    # Process channels sequentially to avoid resource spikes
+    for channel in guild_to_leave.text_channels:
+        if channel.permissions_for(guild_to_leave.me).manage_messages:
+            try:
+                logger.info(f"[BG Task] Purging messages from #{channel.name} in {guild_to_leave.name}...")
+                await channel.purge(limit=200, check=lambda m: m.author == client.user)
+                await asyncio.sleep(1) # Sleep for 1 second between channels to avoid rate limits
+            except Exception as e:
+                logger.error(f"[BG Task] Failed to purge #{channel.name} in {guild_to_leave.name}: {e}")
+        else:
+            logger.warning(f"[BG Task] No 'Manage Messages' permission in #{channel.name} in {guild_to_leave.name}.")
+
+    try:
+        logger.info(f"[BG Task] Purge complete. Leaving guild {guild_to_leave.name}.")
+        await guild_to_leave.leave()
+        
+        # Report success using the webhook
+        await webhook.send(f"✅ **Success:** The bot has deleted its messages and left **{guild_to_leave.name}** (`{guild_id}`).")
+    except Exception as e:
+        logger.error(f"[BG Task] CRITICAL: Failed to leave guild {guild_to_leave.name}: {e}")
+        await webhook.send(f"❌ **Error:** The bot finished purging messages but failed to leave the server. Please kick it manually. Error: `{e}`")
+
+
+@tree.command(name="admin_leave_server", description="[ADMIN] Deletes the bot's messages and leaves the server.")
+@app_commands.describe(server_id="The ID of the server to leave.")
+@app_commands.default_permissions(administrator=True)
+async def admin_leave_server(interaction: discord.Interaction, server_id: str):
+    """Command for the bot owner to make the bot leave a specific server."""
+    if not await client.is_owner(interaction.user):
+        await interaction.response.send_message("❌ This is a bot owner only command.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        guild_id = int(server_id)
+        guild_to_leave = client.get_guild(guild_id)
+
+        if not guild_to_leave:
+            await interaction.followup.send(f"❌ Cannot find a server with the ID: `{server_id}`. The bot may not be in it.")
+            return
+
+        # Get the webhook for safe, delayed responses
+        webhook = interaction.followup
+
+        # Let the admin know the background task has started
+        await webhook.send(f"✅ **Task Started:** The bot will now purge its messages and leave **{guild_to_leave.name}**. This will happen in the background. You will get a final notification here when it's done.")
+
+        # Create and start the independent background task
+        client.loop.create_task(background_purge_and_leave(guild_id, webhook, interaction.user.id))
+
+    except ValueError:
+        await interaction.followup.send("❌ Invalid Server ID format. Please provide a valid integer ID.")
+    except Exception as e:
+        logger.error(f"An error occurred launching admin_leave_server task: {e}")
+        await interaction.followup.send(f"❌ An unexpected error occurred while starting the task: {e}")
+
+# --- Run Bot ---
+if __name__ == "__main__":
+    if BOT_TOKEN:
+        try:
+            client.run(BOT_TOKEN)
+        except discord.LoginFailure:
+            logger.error("❌ Invalid bot token. Please check your DISCORD_TOKEN environment variable.")
+        except Exception as e:
+            logger.error(f"❌ Error starting bot: {e}")
+    else:
+        logger.error("❌ DISCORD_TOKEN not found in environment variables.")
+
+```
