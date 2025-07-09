@@ -54,6 +54,9 @@ class MangodiaBot(discord.Client):
         # Initialize database connection pool
         await self.init_database()
         
+        # Load G25 cog
+        await self.load_extension("g25_cog")
+        
         # Sync commands
         try:
             synced = await self.tree.sync()
