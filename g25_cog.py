@@ -124,7 +124,7 @@ class G25Commands(commands.Cog, name="G25"):
         
         await interaction.followup.send(f"Coordinates for sample '{name}' saved as type '{sample_type}'.")
 
-    @g25.command(name='model', description='Model a sample using source populations.')
+    @g25.command(name='model', description='Model a sample using source populations and generate a pie chart.')
     @app_commands.describe(
         target_sample_name="The name of your saved sample to model.",
         source_populations="Comma-separated list of populations from the main data file.",
@@ -186,11 +186,39 @@ class G25Commands(commands.Cog, name="G25"):
         
         sorted_results = sorted(zip(source_df.index, proportions), key=lambda x: x[1], reverse=True)
         
-        for name, percent in sorted_results:
-            if percent > 0.01:
-                embed.add_field(name=name, value=f"{percent:.2f}%", inline=True)
+        chart_labels = []
+        chart_values = []
+        other_total = 0.0
 
-        await interaction.followup.send(embed=embed)
+        for name, percent in sorted_results:
+            if percent > 1.0: # Threshold for including in the main chart
+                embed.add_field(name=name, value=f"{percent:.2f}%", inline=True)
+                chart_labels.append(name)
+                chart_values.append(percent)
+            elif percent > 0.01:
+                other_total += percent
+
+        if other_total > 0:
+             chart_labels.append("Other")
+             chart_values.append(other_total)
+
+        # Generate Pie Chart
+        plt.style.use('dark_background')
+        fig, ax = plt.subplots(figsize=(10, 7), subplot_kw=dict(aspect="equal"))
+        wedges, texts, autotexts = ax.pie(chart_values, autopct='%1.1f%%', startangle=90, textprops={'color': 'white'})
+        ax.legend(wedges, chart_labels, title="Populations", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
+        plt.setp(autotexts, size=10, weight="bold")
+        ax.set_title(f"Admixture Composition for {target_info['name']}")
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight')
+        buf.seek(0)
+        plt.close()
+        
+        file = discord.File(buf, filename="admixture_chart.png")
+        embed.set_image(url="attachment://admixture_chart.png")
+
+        await interaction.followup.send(embed=embed, file=file)
 
 
     @g25.command(name='leaderboard', description='Shows who is most similar to a population or custom sample.')
@@ -202,11 +230,9 @@ class G25Commands(commands.Cog, name="G25"):
     async def g25_leaderboard(self, interaction: discord.Interaction, population_name: str = None, custom_target_string: str = None, custom_target_file: discord.Attachment = None):
         await interaction.response.defer()
 
-        # Determine the target coordinates
         target_coords = None
         target_name = ""
         
-        # Check that only one target type is provided
         if sum(p is not None for p in [population_name, custom_target_string, custom_target_file]) != 1:
             await interaction.followup.send("Please provide exactly one target: `population_name`, `custom_target_string`, or `custom_target_file`.")
             return
@@ -237,7 +263,6 @@ class G25Commands(commands.Cog, name="G25"):
                 await interaction.followup.send(f"Error reading custom target file: {e}")
                 return
 
-        # Fetch personal samples and calculate distances
         async with self.db_pool.acquire() as connection:
             personal_samples = await connection.fetch("SELECT sample_name, coordinates FROM g25_user_coordinates WHERE sample_type = 'Personal'")
 
