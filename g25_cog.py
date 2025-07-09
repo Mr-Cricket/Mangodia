@@ -10,6 +10,7 @@ import os
 import asyncpg
 from discord import app_commands
 from typing import Literal
+import functools
 
 def calculate_distance(coords1, coords2):
     return np.linalg.norm(np.array(coords1) - np.array(coords2))
@@ -43,15 +44,23 @@ class G25Commands(commands.Cog, name="G25"):
     def __init__(self, bot):
         self.bot = bot
         self.db_pool = None
+        self.g25_data = None # Initialize as None
+        self.bot.loop.create_task(self.load_data_async()) # Start loading data in the background
+        self.bot.loop.create_task(self.connect_to_db())
 
+    async def load_data_async(self):
+        """Load the large CSV file in the background to avoid blocking."""
+        print("Starting background load of g25_scaled_data.csv...")
         try:
-            self.g25_data = pd.read_csv('g25_scaled_data.csv', index_col=0)
-            print("G25 scaled data loaded successfully.")
+            # Run the synchronous pandas read_csv in an executor
+            blocking_task = functools.partial(pd.read_csv, 'g25_scaled_data.csv', index_col=0)
+            self.g25_data = await self.bot.loop.run_in_executor(None, blocking_task)
+            print("G25 scaled data loaded successfully in the background.")
         except FileNotFoundError:
             print("ERROR: g25_scaled_data.csv not found. Please add it to your project repository.")
-            self.g25_data = None
+        except Exception as e:
+            print(f"An error occurred during async data loading: {e}")
 
-        self.bot.loop.create_task(self.connect_to_db())
 
     async def connect_to_db(self):
         try:
@@ -153,7 +162,7 @@ class G25Commands(commands.Cog, name="G25"):
             source_df = parse_g25_multi(custom_sources_string)
         elif source_populations:
             if self.g25_data is None:
-                await interaction.followup.send("G25 population data is not loaded.")
+                await interaction.followup.send("G25 population data is still loading, please try again in a moment.")
                 return
             pop_names = [name.strip() for name in source_populations.split(',')]
             try:
@@ -239,7 +248,7 @@ class G25Commands(commands.Cog, name="G25"):
 
         if population_name:
             if self.g25_data is None:
-                await interaction.followup.send("G25 population data is not loaded.")
+                await interaction.followup.send("G25 population data is still loading, please try again in a moment.")
                 return
             try:
                 target_coords = self.g25_data.loc[population_name].values
@@ -284,7 +293,7 @@ class G25Commands(commands.Cog, name="G25"):
     async def search_population(self, interaction: discord.Interaction, query: str):
         await interaction.response.defer(ephemeral=True)
         if self.g25_data is None:
-            await interaction.followup.send("G25 population data is not loaded.")
+            await interaction.followup.send("G25 population data is still loading, please try again in a moment.")
             return
 
         matches = [pop for pop in self.g25_data.index if query.lower() in pop.lower()]
@@ -300,7 +309,7 @@ class G25Commands(commands.Cog, name="G25"):
     async def list_all_populations(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         if self.g25_data is None:
-            await interaction.followup.send("G25 population data is not loaded.")
+            await interaction.followup.send("G25 population data is still loading, please try again in a moment.")
             return
 
         try:
