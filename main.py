@@ -7,6 +7,7 @@ import random
 import logging
 import json
 from discord import app_commands
+from discord.utils import get
 
 # --- Configuration ---
 BOT_TOKEN = os.environ.get('DISCORD_TOKEN')
@@ -22,6 +23,7 @@ intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
 intents.invites = True
+intents.message_content = True # Required for message deletion
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -468,6 +470,51 @@ async def leaderboard_command(interaction: discord.Interaction):
         embed.description = "No one has any invites yet!"
 
     await interaction.response.send_message(embed=embed)
+
+# --- NEW ADMIN COMMAND ---
+@tree.command(name="admin_leave_server", description="[ADMIN] Deletes the bot's messages and leaves the server.")
+@app_commands.describe(server_id="The ID of the server to leave.")
+@app_commands.default_permissions(administrator=True) # Only admins can see/use this by default
+async def admin_leave_server(interaction: discord.Interaction, server_id: str):
+    """Command for the bot owner to make the bot leave a specific server."""
+    # Security check: Ensure the person using the command is the bot's owner
+    if not await client.is_owner(interaction.user):
+        await interaction.response.send_message("❌ This is a bot owner only command.", ephemeral=True)
+        return
+
+    try:
+        guild_to_leave = client.get_guild(int(server_id))
+        if not guild_to_leave:
+            await interaction.response.send_message(f"❌ Cannot find a server with the ID: `{server_id}`.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(f"✅ Preparing to leave **{guild_to_leave.name}** (`{server_id}`)... This may take a moment.", ephemeral=True)
+
+        # Purge messages from all text channels
+        logger.info(f"Starting message purge in {guild_to_leave.name}...")
+        for channel in guild_to_leave.text_channels:
+            if channel.permissions_for(guild_to_leave.me).read_messages and channel.permissions_for(guild_to_leave.me).manage_messages:
+                try:
+                    # The purge command is efficient for bulk deletion
+                    await channel.purge(limit=500, check=lambda m: m.author == client.user, bulk=True)
+                    logger.info(f"Purged messages from #{channel.name}.")
+                except discord.Forbidden:
+                    logger.warning(f"Could not purge messages in #{channel.name} due to missing permissions.")
+                except Exception as e:
+                    logger.error(f"Error purging messages in #{channel.name}: {e}")
+        
+        # Finally, leave the server
+        logger.info(f"Purge complete. Leaving guild {guild_to_leave.name}.")
+        await guild_to_leave.leave()
+        
+        # Follow-up message to the admin who ran the command
+        await interaction.followup.send(f"✅ Successfully deleted messages and left **{guild_to_leave.name}**.", ephemeral=True)
+
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid Server ID format. Please provide a valid integer ID.", ephemeral=True)
+    except Exception as e:
+        logger.error(f"An error occurred in admin_leave_server: {e}")
+        await interaction.followup.send(f"❌ An unexpected error occurred: {e}", ephemeral=True)
 
 # --- Run Bot ---
 if __name__ == "__main__":
