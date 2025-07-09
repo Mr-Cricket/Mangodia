@@ -1,8 +1,12 @@
+# main.py
+# Mangodia Discord Bot - Enhanced Version with Invite Tracking
+
 import discord
 import os
 import random
 import logging
 import asyncpg
+import asyncio
 from discord import app_commands
 
 # --- Configuration ---
@@ -13,69 +17,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Bot Initialization ---
-intents = discord.Intents.default()
-intents.guilds = True
-intents.members = True
-intents.invites = True
-
-class MangodiaBot(discord.Client):
-    def __init__(self, *, intents: discord.Intents):
-        super().__init__(intents=intents)
-        self.tree = app_commands.CommandTree(self)
-        self.invites_cache = {}
-        self.db_pool = None
-
-    async def setup_hook(self):
-        # This is the recommended place for async setup
-        await self.connect_to_db()
-        await self.load_cogs()
-        synced = await self.tree.sync()
-        logger.info(f'Synced {len(synced)} command(s)')
-
-    async def connect_to_db(self):
-        try:
-            if not DATABASE_URL:
-                logger.error("DATABASE_URL environment variable not set.")
-                return
-            self.db_pool = await asyncpg.create_pool(DATABASE_URL)
-            logger.info("Successfully connected to PostgreSQL database.")
-            await self.initialize_database_tables()
-        except Exception as e:
-            logger.error(f"Failed to connect to database: {e}")
-
-    async def initialize_database_tables(self):
-        if not self.db_pool: return
-        async with self.db_pool.acquire() as connection:
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS invite_rewards (
-                    guild_id BIGINT,
-                    role_id BIGINT,
-                    required_invites INT,
-                    PRIMARY KEY (guild_id, role_id)
-                );
-            ''')
-            await connection.execute('''
-                CREATE TABLE IF NOT EXISTS invite_users (
-                    guild_id BIGINT,
-                    user_id BIGINT,
-                    invites INT DEFAULT 0,
-                    leaves INT DEFAULT 0,
-                    PRIMARY KEY (guild_id, user_id)
-                );
-            ''')
-        logger.info("Invite tracker database tables initialized.")
-
-    async def load_cogs(self):
-        try:
-            await self.load_extension("g25_cog")
-            logger.info("✅ Successfully loaded the G25 Cog.")
-        except Exception as e:
-            logger.error(f"❌ Failed to load G25 Cog: {e}")
-
-client = MangodiaBot(intents=intents)
-
-# --- GIF List ---
+# Enhanced list of GIFs for the FAQ embed with direct URLs for faster loading
 subway_surfers_gifs = [
     'https://media1.tenor.com/m/j2q3H61aU0cAAAAC/subway-surfers.gif',
     'https://media1.tenor.com/m/qiOmXhm9FnQAAAAC/brian-family-guy-tiktok-funny-clip-tasty-sand.gif',
@@ -88,20 +30,204 @@ subway_surfers_gifs = [
     'https://media4.giphy.com/media/fYShjUkJAXW1YO6cNA/giphy.gif'
 ]
 
-# --- Core Invite Logic ---
-async def check_rewards(member: discord.Member):
-    if not client.db_pool: return
+class MangodiaBot(discord.Client):
+    def __init__(self):
+        # Initialize intents for tracking members, guilds, and invites
+        intents = discord.Intents.default()
+        intents.guilds = True
+        intents.members = True
+        intents.invites = True
+        
+        super().__init__(intents=intents)
+        
+        # Initialize command tree
+        self.tree = app_commands.CommandTree(self)
+        
+        # In-memory cache for invites
+        self.invites_cache = {}
+        
+        # Database connection pool
+        self.db_pool = None
     
-    async with client.db_pool.acquire() as connection:
-        user_data = await connection.fetchrow('SELECT invites, leaves FROM invite_users WHERE guild_id = $1 AND user_id = $2', member.guild.id, member.id)
-        if not user_data: return
+    async def setup_hook(self):
+        """Called when the bot is starting up."""
+        # Initialize database connection pool
+        await self.init_database()
+        
+        # Sync commands
+        try:
+            synced = await self.tree.sync()
+            logger.info(f'✅ Synced {len(synced)} command(s)')
+        except Exception as e:
+            logger.error(f'❌ Failed to sync commands: {e}')
+    
+    async def close(self):
+        """Clean up resources when bot shuts down."""
+        if self.db_pool:
+            await self.db_pool.close()
+        await super().close()
+    
+    async def init_database(self):
+        """Initialize database connection pool and create tables if they don't exist."""
+        try:
+            # Use connection pooling for better performance
+            pooled_url = DATABASE_URL.replace('.us-east-2', '-pooler.us-east-2')
+            self.db_pool = await asyncpg.create_pool(pooled_url, min_size=1, max_size=10)
+            
+            # Create tables if they don't exist
+            async with self.db_pool.acquire() as conn:
+                # Create guilds table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS guilds (
+                        guild_id BIGINT PRIMARY KEY,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Create rewards table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS rewards (
+                        guild_id BIGINT REFERENCES guilds(guild_id) ON DELETE CASCADE,
+                        role_id BIGINT,
+                        required_invites INTEGER,
+                        PRIMARY KEY (guild_id, role_id)
+                    )
+                """)
+                
+                # Create users table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        guild_id BIGINT REFERENCES guilds(guild_id) ON DELETE CASCADE,
+                        user_id BIGINT,
+                        invites INTEGER DEFAULT 0,
+                        leaves INTEGER DEFAULT 0,
+                        PRIMARY KEY (guild_id, user_id)
+                    )
+                """)
+            
+            logger.info("Database initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
+            if self.db_pool:
+                await self.db_pool.close()
+    
+    # --- Database Helper Methods ---
+    
+    async def ensure_guild_in_db(self, guild_id):
+        """Ensures a guild exists in the database."""
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute("INSERT INTO guilds (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING", guild_id)
+        except Exception as e:
+            logger.error(f"Error ensuring guild in database: {e}")
+    
+    async def ensure_user_in_db(self, guild_id, user_id):
+        """Ensures a user exists in the guild's database."""
+        await self.ensure_guild_in_db(guild_id)
+        
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO users (guild_id, user_id, invites, leaves) 
+                    VALUES ($1, $2, 0, 0) 
+                    ON CONFLICT (guild_id, user_id) DO NOTHING
+                """, guild_id, user_id)
+        except Exception as e:
+            logger.error(f"Error ensuring user in database: {e}")
+    
+    async def get_user_invites(self, guild_id, user_id):
+        """Get user's invite count from database."""
+        try:
+            async with self.db_pool.acquire() as conn:
+                result = await conn.fetchrow("SELECT invites, leaves FROM users WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
+                return (result['invites'], result['leaves']) if result else (0, 0)
+        except Exception as e:
+            logger.error(f"Error getting user invites: {e}")
+            return (0, 0)
+    
+    async def update_user_invites(self, guild_id, user_id, invite_change=0, leave_change=0):
+        """Update user's invite count in database."""
+        await self.ensure_user_in_db(guild_id, user_id)
+        
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE users 
+                    SET invites = invites + $1, leaves = leaves + $2 
+                    WHERE guild_id = $3 AND user_id = $4
+                """, invite_change, leave_change, guild_id, user_id)
+        except Exception as e:
+            logger.error(f"Error updating user invites: {e}")
+    
+    async def get_guild_rewards(self, guild_id):
+        """Get all rewards for a guild."""
+        try:
+            async with self.db_pool.acquire() as conn:
+                result = await conn.fetch("SELECT role_id, required_invites FROM rewards WHERE guild_id = $1", guild_id)
+                return {str(row['role_id']): row['required_invites'] for row in result}
+        except Exception as e:
+            logger.error(f"Error getting guild rewards: {e}")
+            return {}
+    
+    async def add_guild_reward(self, guild_id, role_id, required_invites):
+        """Add a reward role for a guild."""
+        await self.ensure_guild_in_db(guild_id)
+        
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO rewards (guild_id, role_id, required_invites) 
+                    VALUES ($1, $2, $3) 
+                    ON CONFLICT (guild_id, role_id) DO UPDATE SET required_invites = $3
+                """, guild_id, role_id, required_invites)
+        except Exception as e:
+            logger.error(f"Error adding guild reward: {e}")
+    
+    async def remove_guild_reward(self, guild_id, role_id):
+        """Remove a reward role for a guild."""
+        try:
+            async with self.db_pool.acquire() as conn:
+                result = await conn.execute("DELETE FROM rewards WHERE guild_id = $1 AND role_id = $2", guild_id, role_id)
+                return result != "DELETE 0"
+        except Exception as e:
+            logger.error(f"Error removing guild reward: {e}")
+            return False
+    
+    async def get_guild_users_leaderboard(self, guild_id, limit=10):
+        """Get top users by invite count for a guild."""
+        try:
+            async with self.db_pool.acquire() as conn:
+                result = await conn.fetch("""
+                    SELECT user_id, invites, leaves, (invites - leaves) as net_invites
+                    FROM users 
+                    WHERE guild_id = $1 AND (invites - leaves) > 0
+                    ORDER BY net_invites DESC 
+                    LIMIT $2
+                """, guild_id, limit)
+                return [(row['user_id'], row['invites'], row['leaves'], row['net_invites']) for row in result]
+        except Exception as e:
+            logger.error(f"Error getting guild leaderboard: {e}")
+            return []
+    
+    # --- Utility Methods ---
+    
+    def find_invite_by_code(self, invite_list, code):
+        """Finds a specific invite from a list of invites."""
+        for inv in invite_list:
+            if inv.code == code:
+                return inv
+        return None
+    
+    async def check_rewards(self, member: discord.Member):
+        """Checks if a member has earned any reward roles and applies them."""
+        rewards = await self.get_guild_rewards(member.guild.id)
+        invites, leaves = await self.get_user_invites(member.guild.id, member.id)
+        total_invites = invites - leaves
 
-        net_invites = user_data['invites'] - user_data['leaves']
-        rewards = await connection.fetch('SELECT role_id, required_invites FROM invite_rewards WHERE guild_id = $1', member.guild.id)
-
-        for reward in rewards:
-            role = member.guild.get_role(reward['role_id'])
-            if role and net_invites >= reward['required_invites'] and role not in member.roles:
+        for role_id, required_invites in rewards.items():
+            role = member.guild.get_role(int(role_id))
+            if role and total_invites >= required_invites and role not in member.roles:
                 try:
                     await member.add_roles(role, reason="Invite Reward")
                     logger.info(f"Gave role {role.name} to {member.name}")
@@ -109,231 +235,361 @@ async def check_rewards(member: discord.Member):
                     logger.warning(f"Could not give role {role.name} to {member.name} - permissions missing.")
                 except Exception as e:
                     logger.error(f"Error giving role {role.name} to {member.name}: {e}")
+    
+    # --- Bot Events ---
+    
+    async def on_ready(self):
+        """Fires when the bot has connected to Discord and is ready."""
+        logger.info(f'🤖 Logged in as {self.user} (ID: {self.user.id})')
 
-# --- Bot Events ---
-@client.event
-async def on_ready():
-    logger.info(f'🤖 Logged in as {client.user} (ID: {client.user.id})')
-    for guild in client.guilds:
+        # Cache invites for all guilds on startup
+        for guild in self.guilds:
+            try:
+                self.invites_cache[guild.id] = await guild.invites()
+                await self.ensure_guild_in_db(guild.id)
+            except discord.Forbidden:
+                logger.warning(f"Don't have permissions to get invites for {guild.name}")
+            except Exception as e:
+                logger.error(f"Error caching invites for {guild.name}: {e}")
+    
+    async def on_member_join(self, member: discord.Member):
+        """Tracks when a new member joins and attributes the invite."""
+        guild = member.guild
+        logger.info(f"Member {member.name} joined {guild.name}")
+
         try:
-            client.invites_cache[guild.id] = await guild.invites()
+            invites_before_join = self.invites_cache.get(guild.id, [])
+            invites_after_join = await guild.invites()
+            self.invites_cache[guild.id] = invites_after_join
+
+            for invite in invites_before_join:
+                used_invite = self.find_invite_by_code(invites_after_join, invite.code)
+                if used_invite and invite.uses < used_invite.uses:
+                    inviter = invite.inviter
+                    if inviter:  # Check if inviter exists
+                        logger.info(f"{member.name} was invited by {inviter.name}")
+
+                        await self.update_user_invites(guild.id, inviter.id, invite_change=1)
+
+                        # Check for role rewards
+                        inviter_member = guild.get_member(inviter.id)
+                        if inviter_member:
+                            await self.check_rewards(inviter_member)
+                    return
+
         except discord.Forbidden:
-            logger.warning(f"Don't have permissions to get invites for {guild.name}")
+            logger.warning(f"Cannot track invites in {guild.name} due to missing permissions.")
+        except Exception as e:
+            logger.error(f"Error in on_member_join: {e}")
+    
+    async def on_member_remove(self, member: discord.Member):
+        """Tracks when a member leaves to adjust invite counts."""
+        logger.info(f"Member {member.name} left {member.guild.name}")
+        # Note: Advanced implementation would track who invited whom to adjust leave counts
+    
+    async def on_invite_create(self, invite: discord.Invite):
+        """Updates the invite cache when a new invite is created."""
+        try:
+            self.invites_cache[invite.guild.id] = await invite.guild.invites()
+        except Exception as e:
+            logger.error(f"Error updating invite cache on create: {e}")
+    
+    async def on_invite_delete(self, invite: discord.Invite):
+        """Updates the invite cache when an invite is deleted."""
+        try:
+            self.invites_cache[invite.guild.id] = await invite.guild.invites()
+        except Exception as e:
+            logger.error(f"Error updating invite cache on delete: {e}")
 
-@client.event
-async def on_member_join(member: discord.Member):
-    guild = member.guild
-    logger.info(f"Member {member.name} joined {guild.name}")
-    if not client.db_pool: return
-
-    try:
-        invites_before = client.invites_cache.get(guild.id, [])
-        invites_after = await guild.invites()
-        client.invites_cache[guild.id] = invites_after
-
-        for invite in invites_before:
-            used_invite = discord.utils.find(lambda i: i.code == invite.code, invites_after)
-            if used_invite and invite.uses < used_invite.uses and invite.inviter:
-                inviter = invite.inviter
-                logger.info(f"{member.name} was invited by {inviter.name}")
-                async with client.db_pool.acquire() as connection:
-                    await connection.execute('''
-                        INSERT INTO invite_users (guild_id, user_id, invites) VALUES ($1, $2, 1)
-                        ON CONFLICT (guild_id, user_id) DO UPDATE SET invites = invite_users.invites + 1;
-                    ''', guild.id, inviter.id)
-                
-                inviter_member = guild.get_member(inviter.id)
-                if inviter_member:
-                    await check_rewards(inviter_member)
-                return
-    except discord.Forbidden:
-        logger.warning(f"Cannot track invites in {guild.name} due to missing permissions.")
-    except Exception as e:
-        logger.error(f"Error in on_member_join: {e}")
+# --- Create Bot Instance ---
+bot = MangodiaBot()
 
 # --- COMMANDS ---
-@client.tree.command(name="setup", description="Posts the server rules and FAQ embeds in the current channel.")
+@bot.tree.command(name="setup", description="Posts the server rules and FAQ embeds in the current channel.")
 async def setup_command(interaction: discord.Interaction):
+    """Handles the /setup slash command to post server info."""
     if not interaction.user.guild_permissions.manage_messages:
-        await interaction.response.send_message("❌ You need 'Manage Messages' permission.", ephemeral=True)
+        await interaction.response.send_message("❌ You need 'Manage Messages' permission to use this command.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
-    
-    # --- Rules Embed with Enhanced Design ---
-    rules_embed = discord.Embed(
-        title="📜 **MANGODIA RULES**",
-        description="*Please read and adhere to these guidelines to maintain a positive community environment.*",
-        color=0xFF6B6B  # Red color
-    )
-    
-    rules_embed.add_field(
-        name="🚫 **1. No Harassment or Bullying**",
-        value="Treat all members with respect. No personal attacks, threats, or discriminatory language.",
-        inline=False
-    )
-    
-    rules_embed.add_field(
-        name="🔞 **2. Keep Content Appropriate**",
-        value="No NSFW content, excessive profanity, or inappropriate discussions. Keep it family-friendly.",
-        inline=False
-    )
-    
-    rules_embed.add_field(
-        name="📢 **3. No Spam or Self-Promotion**",
-        value="Avoid repetitive messages, excessive caps, or unauthorized advertising. Ask mods before sharing links.",
-        inline=False
-    )
-    
-    rules_embed.add_field(
-        name="💬 **4. Use Appropriate Channels**",
-        value="Post content in the relevant channels. Keep discussions on-topic and organized.",
-        inline=False
-    )
-    
-    rules_embed.add_field(
-        name="🎭 **5. Respect Privacy**",
-        value="Don't share personal information without consent. Respect others' boundaries and privacy.",
-        inline=False
-    )
-    
-    rules_embed.add_field(
-        name="⚖️ **6. Follow Discord TOS**",
-        value="All Discord Terms of Service and Community Guidelines apply here.",
-        inline=False
-    )
-    
-    rules_embed.set_footer(text="Violations may result in warnings, mutes, or bans • Stay awesome! �")
-    rules_embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1234567890123456789.png")  # Replace with your server icon
 
-    # --- GIF Embed for FAQ Attention ---
-    gif_embed = discord.Embed(
-        title="🏃‍♂️ **ATTENTION SPAN BOOSTER**",
-        description="*Since your attention span is probably shorter than a TikTok video, here's some Subway Surfers gameplay while you read the FAQ below!*",
-        color=0x4ECDC4  # Teal color
-    )
-    
-    gif_embed.set_image(url=random.choice(subway_surfers_gifs))
-    gif_embed.set_footer(text="Now you can focus on reading the FAQ below! 🎮")
+    try:
+        # --- Rules Embed with Enhanced Design ---
+        rules_embed = discord.Embed(
+            title="📜 **MANGODIA RULES**",
+            description="Please read and adhere to the following rules. Failure to do so will result in disciplinary action.",
+            color=0xFF6B6B  # Red color
+        )
 
-    # --- FAQ Embed with Enhanced Design ---
-    faq_embed = discord.Embed(
-        title="❓ **FREQUENTLY ASKED QUESTIONS**",
-        description="*Here are answers to the most common questions about our server.*",
-        color=0x45B7D1  # Blue color
-    )
-    
-    faq_embed.add_field(
-        name="🤖 **What is this server about?**",
-        value="Mangodia is a community focused on gaming, chatting, and having a great time together!",
-        inline=False
-    )
-    
-    faq_embed.add_field(
-        name="🎮 **What games do we play?**",
-        value="We play a variety of games including Minecraft, Among Us, Valorant, and many more! Check the gaming channels.",
-        inline=False
-    )
-    
-    faq_embed.add_field(
-        name="🏆 **How do I get roles?**",
-        value="Many roles are earned through activity, inviting friends, or participating in events. Some can be self-assigned!",
-        inline=False
-    )
-    
-    faq_embed.add_field(
-        name="📞 **Can I join voice channels?**",
-        value="Absolutely! Feel free to hop into any voice channel and chat with other members.",
-        inline=False
-    )
-    
-    faq_embed.add_field(
-        name="🎉 **Are there events?**",
-        value="Yes! We regularly host gaming tournaments, movie nights, and other fun community events.",
-        inline=False
-    )
-    
-    faq_embed.add_field(
-        name="🆘 **Who do I contact for help?**",
-        value="Reach out to any moderator or admin (they have colored names) if you need assistance!",
-        inline=False
-    )
-    
-    faq_embed.set_footer(text="Still have questions? Don't hesitate to ask in the general chat! 💬")
+        rules_embed.add_field(
+            name="💬 **1. Keep the Discussion Cordial**",
+            value="Discrimination is not tolerated. This includes racism, sexism, homophobia, transphobia, ableism, etc. There's a fine line between edgy humour and actual discrimination. Keep it just witty banter, but nothing more. Millions must love.",
+            inline=False
+        )
 
-    await interaction.channel.send(embeds=[rules_embed, gif_embed, faq_embed])
-    await interaction.followup.send("✅ **Setup Complete!**", ephemeral=True)
+        rules_embed.add_field(
+            name="🚫 **2. NO EXTREMIST SYMBOLISM OR IDEOLOGY**",
+            value="Discord does not bloody tolerate overt extremism of any kind, and they do not care if it's an edgy joke. Nazi or fascist adjacent symbolism will be immediately removed and you will be muted. This is not brain surgery; it's very simple.",
+            inline=False
+        )
 
-# --- INVITE TRACKING COMMANDS (DB Version) ---
-@client.tree.command(name="add-reward", description="Add a role to be given as an invite reward.")
+        rules_embed.add_field(
+            name="🔴 **3. NO PAEDOPHILIA**",
+            value="Permaban.",
+            inline=False
+        )
+
+        rules_embed.add_field(
+            name="📢 **4. No raiding or spamming**",
+            value="Raiding or spamming is grounds for a permaban at the discretion of a staff member. It's just Discord, it's not that serious. Don't ruin the server for other people.",
+            inline=False
+        )
+
+        rules_embed.add_field(
+            name="🔒 **5. No ban or mute evasion**",
+            value="Staff will review ban and mute appeals with a degree of frequency. There is no reason to evade, this is grounds for a permaban. Staff members that abuse their permission will be reprimanded.",
+            inline=False
+        )
+
+        rules_embed.add_field(
+            name="🏷️ **6. Do not tag staff unless it is an emergency**",
+            value="You aren't funny, you are just a bellend.",
+            inline=False
+        )
+
+        rules_embed.add_field(
+            name="🔞 **7. No NSFW/NSFL content**",
+            value="All content must be Safe For Work. No explicit or NSFW material should be shared on this server. It's disturbing, and you should seek help instead of posting on Discord.",
+            inline=False
+        )
+
+        rules_embed.add_field(
+            name="🎭 **8. No Impersonation**",
+            value="Do not impersonate other users, staff, or public figures. This includes using similar usernames, profile pictures, or pretending to be someone else in chat. Your impersonation slop account is not hilarious. Staff will not be laughing when you get kicked.",
+            inline=False
+        )
+
+        rules_embed.add_field(
+            name="📺 **9. No Self-Promotion or Advertising**",
+            value="Don't advertise or promote your content, Discord servers, or other platforms without permission from mods. If you want to partner, do it through the appropriate avenues.",
+            inline=False
+        )
+
+        rules_embed.add_field(
+            name="🇬🇧 **10. ENGLISH ONLY**",
+            value="There are ESL channels for non-English speakers. Otherwise, you must speak the King's English to keep discussion in general channels readable.",
+            inline=False
+        )
+
+        rules_embed.add_field(
+            name="📍 **11. Try to use the appropriate channel**",
+            value="Try to keep content in the relevant channel to avoid cluttering channels.",
+            inline=False
+        )
+
+        rules_embed.add_field(
+            name="🔐 **12. Do not dox, threaten to dox, or share personal details**",
+            value="Any malicious actors who threaten to dox any member of the server. You will be lucky if you only get banned. Discord should never be this serious, and we take the well-being of members of Mangodia seriously.",
+            inline=False
+        )
+
+        rules_embed.add_field(
+            name="⚖️ **13. Follow Discord TOS**",
+            value="I know that none of you have read it, but everyone must comply with the Discord TOS regardless. If you do not comply with Discord TOS in any way then you will be banned.",
+            inline=False
+        )
+
+        rules_embed.set_footer(text="Thank you for your cooperation. • Mangodia Staff Team")
+        rules_embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1234567890123456789.png")  # Replace with your server icon
+
+        # --- GIF Embed for FAQ Attention ---
+        gif_embed = discord.Embed(
+            title="🏃‍♂️ **ATTENTION SPAN BOOSTER**",
+            description="*The average attention span in this server is approximately that of a goldfish so we expect to still be countlessly asked these questions. Here's some Subway Surfers gameplay to keep your attention while you read the FAQ below!*",
+            color=0x4ECDC4  # Teal color
+        )
+
+        # Randomly select a GIF with fallback
+        try:
+            selected_gif = random.choice(subway_surfers_gifs)
+            gif_embed.set_image(url=selected_gif)
+            logger.info(f"Selected GIF: {selected_gif}")
+        except Exception as e:
+            logger.warning(f"Failed to set GIF: {e}")
+
+        gif_embed.set_footer(text="Now you can focus on reading the FAQ below, you tiktok brained zoomers.")
+
+        # --- FAQ Embed with Enhanced Design ---
+        faq_embed = discord.Embed(
+            title="❓ **FREQUENTLY ASKED QUESTIONS**",
+            description="We expect to still be asked these questions countlessly despite this FAQ existing.",
+            color=0x45B7D1  # Blue color
+        )
+
+        faq_embed.add_field(
+            name="🖼️ **How do I get pic perms?**",
+            value="Members who want image perms need to invite five members to the server. Invitations are tracked, and image perms are automatically given when a member invites five members to the server. This helps with growth and helps not to pollute the server with unfunny shitposts.",
+            inline=False
+        )
+
+        faq_embed.add_field(
+            name="🛡️ **How do I become a mod?**",
+            value="We do not accept mod applications. Members will be given mod if Mango or anyone else with role perms likes them. If you aren't annoying and are semi-active, there's a very decent chance you will get mod.",
+            inline=False
+        )
+
+        faq_embed.add_field(
+            name="📋 **How do I appeal?**",
+            value="There is a ticket system where people can send tickets with what punishment they received and a short explanation as to why it was not justified. Mods that repeatedly issue unfair infractions will be reprimanded and could be removed from the mod team.",
+            inline=False
+        )
+
+        faq_embed.set_footer(text="Still have questions? Don't hesitate to ask in the general chat! 💬")
+
+        # Send all embeds and add reactions
+        rules_message = await interaction.followup.send(embed=rules_embed)
+        await rules_message.add_reaction("📜")
+        
+        gif_message = await interaction.followup.send(embed=gif_embed)
+        await gif_message.add_reaction("🏃‍♂️")
+        
+        faq_message = await interaction.followup.send(embed=faq_embed)
+        await faq_message.add_reaction("✅")
+
+        await interaction.followup.send("✅ **Setup Complete!** All embeds have been posted successfully.", ephemeral=True)
+
+    except Exception as e:
+        logger.error(f"Error in setup command: {e}")
+        await interaction.followup.send("❌ An error occurred during setup. Please try again.", ephemeral=True)
+
+@bot.tree.command(name="add-reward", description="Add a role to be given as an invite reward.")
 @app_commands.describe(role="The role to be awarded.", invites="The number of invites required.")
-async def add_reward(interaction: discord.Interaction, role: discord.Role, invites: int):
+async def add_reward_command(interaction: discord.Interaction, role: discord.Role, invites: int):
+    """Command to set up a new invite reward."""
     if not interaction.user.guild_permissions.manage_roles:
-        await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
+        await interaction.response.send_message("❌ You need 'Manage Roles' permission to use this command.", ephemeral=True)
         return
+
     if invites < 1:
         await interaction.response.send_message("❌ Invite count must be at least 1.", ephemeral=True)
         return
-    if not client.db_pool: return
 
-    async with client.db_pool.acquire() as connection:
-        await connection.execute('''
-            INSERT INTO invite_rewards (guild_id, role_id, required_invites) VALUES ($1, $2, $3)
-            ON CONFLICT (guild_id, role_id) DO UPDATE SET required_invites = EXCLUDED.required_invites;
-        ''', interaction.guild.id, role.id, invites)
-    
-    await interaction.response.send_message(f"✅ Reward set: **{role.name}** for **{invites}** invites.", ephemeral=True)
+    await bot.add_guild_reward(interaction.guild.id, role.id, invites)
 
-@client.tree.command(name="invites", description="Check how many invites a user has.")
-@app_commands.describe(user="The user to check (optional, defaults to you).")
-async def invites_command(interaction: discord.Interaction, user: discord.Member = None):
-    target_user = user or interaction.user
-    if not client.db_pool: return
-    
-    async with client.db_pool.acquire() as connection:
-        record = await connection.fetchrow('SELECT invites, leaves FROM invite_users WHERE guild_id = $1 AND user_id = $2', interaction.guild.id, target_user.id)
+    embed = discord.Embed(
+        title="✅ Reward Added",
+        description=f"Users will now get the **{role.name}** role for **{invites}** invites!",
+        color=0x50C878
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    invites = record['invites'] if record else 0
-    leaves = record['leaves'] if record else 0
-    net_invites = invites - leaves
+@bot.tree.command(name="remove-reward", description="Remove an invite reward role.")
+@app_commands.describe(role="The reward role to remove.")
+async def remove_reward_command(interaction: discord.Interaction, role: discord.Role):
+    """Command to remove an invite reward."""
+    if not interaction.user.guild_permissions.manage_roles:
+        await interaction.response.send_message("❌ You need 'Manage Roles' permission to use this command.", ephemeral=True)
+        return
 
-    embed = discord.Embed(title=f"📊 Invite Stats for {target_user.display_name}", color=target_user.color)
-    embed.set_thumbnail(url=target_user.display_avatar.url)
-    embed.add_field(name="✅ Successful", value=invites, inline=True)
-    embed.add_field(name="❌ Left", value=leaves, inline=True)
-    embed.add_field(name="📈 Net", value=net_invites, inline=True)
+    if await bot.remove_guild_reward(interaction.guild.id, role.id):
+        embed = discord.Embed(
+            title="✅ Reward Removed",
+            description=f"Reward for role **{role.name}** has been removed.",
+            color=0x50C878
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ That role is not currently set as a reward.", ephemeral=True)
+
+@bot.tree.command(name="rewards", description="View all current invite rewards.")
+async def rewards_command(interaction: discord.Interaction):
+    """Command to view all current invite rewards."""
+    rewards = await bot.get_guild_rewards(interaction.guild.id)
+
+    if not rewards:
+        await interaction.response.send_message("❌ No invite rewards are currently set up.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🏆 Invite Rewards",
+        description="Here are all the current invite rewards:",
+        color=0xFFD700
+    )
+
+    for role_id, required_invites in sorted(rewards.items(), key=lambda x: x[1]):
+        role = interaction.guild.get_role(int(role_id))
+        if role:
+            embed.add_field(
+                name=f"**{role.name}**",
+                value=f"{required_invites} invites",
+                inline=True
+            )
+
     await interaction.response.send_message(embed=embed)
 
-@client.tree.command(name="leaderboard", description="View the top inviters in the server.")
+@bot.tree.command(name="invites", description="Check how many invites a user has.")
+@app_commands.describe(user="The user to check (optional, defaults to you).")
+async def invites_command(interaction: discord.Interaction, user: discord.Member = None):
+    """Command to check a user's invites."""
+    target_user = user or interaction.user
+    invites, leaves = await bot.get_user_invites(interaction.guild.id, target_user.id)
+    total_invites = invites - leaves
+
+    embed = discord.Embed(
+        title=f"📊 Invite Stats for {target_user.display_name}",
+        description=f"**Total Invites:** {total_invites}",
+        color=target_user.color or 0x2F3136
+    )
+    embed.set_thumbnail(url=target_user.display_avatar.url)
+    embed.add_field(name="✅ Successful Invites", value=invites, inline=True)
+    embed.add_field(name="❌ Left Members", value=leaves, inline=True)
+    embed.add_field(name="📈 Net Invites", value=total_invites, inline=True)
+
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="leaderboard", description="View the top inviters in the server.")
 async def leaderboard_command(interaction: discord.Interaction):
-    if not client.db_pool: return
-    
-    async with client.db_pool.acquire() as connection:
-        records = await connection.fetch('''
-            SELECT user_id, invites, leaves FROM invite_users
-            WHERE guild_id = $1 AND (invites - leaves) > 0
-            ORDER BY (invites - leaves) DESC
-            LIMIT 10;
-        ''', interaction.guild.id)
+    """Command to view the invite leaderboard."""
+    users = await bot.get_guild_users_leaderboard(interaction.guild.id)
 
-    embed = discord.Embed(title="🏆 Invite Leaderboard", description="Top inviters in the server:", color=0xFFD700)
+    if not users:
+        await interaction.response.send_message("❌ No invite data available yet.", ephemeral=True)
+        return
 
-    if not records:
+    embed = discord.Embed(
+        title="🏆 Invite Leaderboard",
+        description="Top inviters in the server:",
+        color=0xFFD700
+    )
+
+    for i, (user_id, invites, leaves, net_invites) in enumerate(users, 1):
+        member = interaction.guild.get_member(user_id)
+        if member:
+            embed.add_field(
+                name=f"{i}. {member.display_name}",
+                value=f"{net_invites} invites",
+                inline=False
+            )
+
+    if not embed.fields:
         embed.description = "No one has any invites yet!"
-    else:
-        leaderboard_text = []
-        for i, record in enumerate(records, 1):
-            member = interaction.guild.get_member(record['user_id'])
-            if member:
-                net_invites = record['invites'] - record['leaves']
-                leaderboard_text.append(f"{i}. **{member.display_name}** - {net_invites} invites")
-        embed.description = "\n".join(leaderboard_text)
 
     await interaction.response.send_message(embed=embed)
 
 # --- Run Bot ---
 if __name__ == "__main__":
-    if BOT_TOKEN:
-        client.run(BOT_TOKEN)
-    else:
+    if not BOT_TOKEN:
         logger.error("❌ DISCORD_TOKEN not found in environment variables.")
+        exit(1)
+        
+    if not DATABASE_URL:
+        logger.error("❌ DATABASE_URL not found in environment variables.")
+        exit(1)
+        
+    try:
+        bot.run(BOT_TOKEN)
+    except discord.LoginFailure:
+        logger.error("❌ Invalid bot token. Please check your DISCORD_TOKEN environment variable.")
+    except Exception as e:
+        logger.error(f"❌ Error starting bot: {e}")
