@@ -6,17 +6,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# List of GIFs for the FAQ embed
+# List of GIFs for the FAQ embed - Updated with your provided URLs
 subway_surfers_gifs = [
-    'https://media1.tenor.com/m/j2q3H61aU0cAAAAC/subway-surfers.gif',
-    'https://media1.tenor.com/m/qiOmXhm9FnQAAAAC/brian-family-guy-tiktok-funny-clip-tasty-sand.gif',
-    'https://media1.tenor.com/m/r_n5-n2cf2IAAAAC/subway-surfer.gif',
-    'https://media0.giphy.com/media/dkUtjuBEdICST5zG7p/giphy.gif',
-    'https://media1.giphy.com/media/Fr5LA2RCQbnVp74CxH/giphy.gif',
-    'https://media2.giphy.com/media/UTemva5AkBntdGyAPM/giphy.gif',
-    'https://media3.giphy.com/media/wc4gc2LmKZOU7bxFcQ/giphy.gif',
-    'https://media1.tenor.com/m/G0yFMh7PL6QAAAAC/speech-bubble-cs-go-surf-surfing.gif',
-    'https://media4.giphy.com/media/fYShjUkJAXW1YO6cNA/giphy.gif'
+    'https://media3.giphy.com/media/Fr5LA2RCQbnVp74CxH/giphy.gif',
+    'https://media4.giphy.com/media/fYShjUkJAXW1YO6cNA/giphy.gif',
+    'https://media4.giphy.com/media/UTemva5AkBntdGyAPM/giphy.gif',
+    'https://media.tenor.com/G0yFMh7PL6QAAAAC/speech-bubble-cs-go-surf-surfing.gif',
+    'https://media.tenor.com/qiOmXhm9FnQAAAAC/brian-family-guy-tiktok-funny-clip-tasty-sand.gif',
+    'https://media.tenor.com/j2q3H61aU0cAAAAC/subway-surfers.gif',
+    'https://media.tenor.com/Xz1400s4qjUAAAAC/subway-surfers-subway-surfer.gif'
 ]
 
 class RulesCog(commands.Cog, name="Server Rules"):
