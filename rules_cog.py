@@ -25,14 +25,13 @@ class RulesCog(commands.Cog, name="Server Rules"):
         self.bot = bot
 
     @app_commands.command(name="setup", description="Posts the server rules and FAQ embeds in the current channel.")
+    @app_commands.default_permissions(manage_messages=True) # This line makes the command admin-only
     async def setup(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("❌ You need 'Manage Messages' permission.", ephemeral=True)
-            return
         
         await interaction.response.defer(ephemeral=True)
         
         try:
+            # --- Rules Embed ---
             rules_embed = discord.Embed(title="📜 **MANGODIA RULES**", description="Please read and adhere to the following rules. Failure to do so will result in disciplinary action.", color=0xFF6B6B)
             rules_embed.add_field(name="💬 **1. Keep the Discussion Cordial**", value="Discrimination is not tolerated. This includes racism, sexism, homophobia, transphobia, ableism, etc. There's a fine line between edgy humour and actual discrimination. Keep it just witty banter, but nothing more. Millions must love.", inline=False)
             rules_embed.add_field(name="🚫 **2. NO EXTREMIST SYMBOLISM OR IDEOLOGY**", value="Discord does not bloody tolerate overt extremism of any kind, and they do not care if it's an edgy joke. Nazi or fascist adjacent symbolism will be immediately removed and you will be muted. This is not brain surgery; it's very simple.", inline=False)
@@ -49,20 +48,27 @@ class RulesCog(commands.Cog, name="Server Rules"):
             rules_embed.add_field(name="⚖️ **13. Follow Discord TOS**", value="I know that none of you have read it, but everyone must comply with the Discord TOS regardless. If you do not comply with Discord TOS in any way then you will be banned.", inline=False)
             rules_embed.set_footer(text="Thank you for your cooperation. • Mangodia Staff Team")
             
+            # --- GIF Embed ---
             gif_embed = discord.Embed(title="🏃‍♂️ **ATTENTION SPAN BOOSTER**", description="*The average attention span in this server is approximately that of a goldfish so we expect to still be countlessly asked these questions. Here's some Subway Surfers gameplay to keep your attention while you read the FAQ below!*", color=0x4ECDC4)
             gif_embed.set_image(url=random.choice(subway_surfers_gifs))
-            gif_embed.set_footer(text="Now you can focus on reading the FAQ below, you tiktok brained zoomers.")
+            # The footer text was removed to improve rendering reliability of the GIF.
             
+            # --- FAQ Embed ---
             faq_embed = discord.Embed(title="❓ **FREQUENTLY ASKED QUESTIONS**", description="We expect to still be asked these questions countlessly despite this FAQ existing.", color=0x45B7D1)
             faq_embed.add_field(name="🖼️ **How do I get pic perms?**", value="Members who want image perms need to invite five members to the server. Invitations are tracked, and image perms are automatically given when a member invites five members to the server. This helps with growth and helps not to pollute the server with unfunny shitposts.", inline=False)
             faq_embed.add_field(name="🛡️ **How do I become a mod?**", value="We do not accept mod applications. Members will be given mod if Mango or anyone else with role perms likes them. If you aren't annoying and are semi-active, there's a very decent chance you will get mod.", inline=False)
             faq_embed.add_field(name="📋 **How do I appeal?**", value="There is a ticket system where people can send tickets with what punishment they received and a short explanation as to why it was not justified. Mods that repeatedly issue unfair infractions will be reprimanded and could be removed from the mod team.", inline=False)
             faq_embed.set_footer(text="Still have questions? Don't hesitate to ask in the general chat! 💬")
             
-            main_message = await interaction.channel.send(embeds=[rules_embed, gif_embed, faq_embed])
-            await main_message.add_reaction("📜")
-            await main_message.add_reaction("🏃‍♂️")
-            await main_message.add_reaction("✅")
+            # Send each embed as a separate message and add the correct reaction
+            rules_message = await interaction.channel.send(embed=rules_embed)
+            await rules_message.add_reaction("📜")
+
+            gif_message = await interaction.channel.send(embed=gif_embed)
+            await gif_message.add_reaction("🏃‍♂️")
+
+            faq_message = await interaction.channel.send(embed=faq_embed)
+            await faq_message.add_reaction("✅")
             
             await interaction.followup.send("✅ **Setup Complete!**", ephemeral=True)
         except Exception as e:
