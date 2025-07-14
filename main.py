@@ -149,7 +149,7 @@ class MangodiaBot(commands.Bot):
         try:
             async with self.db_pool.acquire() as conn:
                 await conn.execute("""
-                    INSERT INTO users (guild_id, user_id, invites, leaves) VALUES ($1, $2, 0, 0)
+                    INSERT INTO invite_users (guild_id, user_id, invites, leaves) VALUES ($1, $2, 0, 0)
                     ON CONFLICT (guild_id, user_id) DO NOTHING
                 """, guild_id, user_id)
         except Exception as e:
@@ -158,7 +158,7 @@ class MangodiaBot(commands.Bot):
     async def get_user_invites(self, guild_id, user_id):
         try:
             async with self.db_pool.acquire() as conn:
-                result = await conn.fetchrow("SELECT invites, leaves FROM users WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
+                result = await conn.fetchrow("SELECT invites, leaves FROM invite_users WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
                 return (result['invites'], result['leaves']) if result else (0, 0)
         except Exception as e:
             logger.error(f"Error getting user invites: {e}")
@@ -169,7 +169,7 @@ class MangodiaBot(commands.Bot):
         try:
             async with self.db_pool.acquire() as conn:
                 await conn.execute("""
-                    UPDATE users SET invites = invites + $1, leaves = leaves + $2
+                    UPDATE invite_users SET invites = invites + $1, leaves = leaves + $2
                     WHERE guild_id = $3 AND user_id = $4
                 """, invite_change, leave_change, guild_id, user_id)
         except Exception as e:
@@ -178,7 +178,7 @@ class MangodiaBot(commands.Bot):
     async def get_guild_rewards(self, guild_id):
         try:
             async with self.db_pool.acquire() as conn:
-                result = await conn.fetch("SELECT role_id, required_invites FROM rewards WHERE guild_id = $1", guild_id)
+                result = await conn.fetch("SELECT role_id, required_invites FROM invite_rewards WHERE guild_id = $1", guild_id)
                 return {str(row['role_id']): row['required_invites'] for row in result}
         except Exception as e:
             logger.error(f"Error getting guild rewards: {e}")
@@ -189,7 +189,7 @@ class MangodiaBot(commands.Bot):
         try:
             async with self.db_pool.acquire() as conn:
                 await conn.execute("""
-                    INSERT INTO rewards (guild_id, role_id, required_invites) VALUES ($1, $2, $3)
+                    INSERT INTO invite_rewards (guild_id, role_id, required_invites) VALUES ($1, $2, $3)
                     ON CONFLICT (guild_id, role_id) DO UPDATE SET required_invites = $3
                 """, guild_id, role_id, required_invites)
         except Exception as e:
@@ -198,7 +198,7 @@ class MangodiaBot(commands.Bot):
     async def remove_guild_reward(self, guild_id, role_id):
         try:
             async with self.db_pool.acquire() as conn:
-                result = await conn.execute("DELETE FROM rewards WHERE guild_id = $1 AND role_id = $2", guild_id, role_id)
+                result = await conn.execute("DELETE FROM invite_rewards WHERE guild_id = $1 AND role_id = $2", guild_id, role_id)
                 return result != "DELETE 0"
         except Exception as e:
             logger.error(f"Error removing guild reward: {e}")
@@ -208,7 +208,7 @@ class MangodiaBot(commands.Bot):
         try:
             async with self.db_pool.acquire() as conn:
                 result = await conn.fetch("""
-                    SELECT user_id, invites, leaves, (invites - leaves) as net_invites FROM users
+                    SELECT user_id, invites, leaves, (invites - leaves) as net_invites FROM invite_users
                     WHERE guild_id = $1 AND (invites - leaves) > 0
                     ORDER BY net_invites DESC LIMIT $2
                 """, guild_id, limit)
@@ -293,7 +293,9 @@ class MangodiaBot(commands.Bot):
         if not interaction.user.guild_permissions.manage_messages:
             await interaction.response.send_message("❌ You need 'Manage Messages' permission.", ephemeral=True)
             return
+        
         await interaction.response.defer(ephemeral=True)
+        
         try:
             rules_embed = discord.Embed(title="📜 **MANGODIA RULES**", description="Please read and adhere to the following rules. Failure to do so will result in disciplinary action.", color=0xFF6B6B)
             rules_embed.add_field(name="💬 **1. Keep the Discussion Cordial**", value="Discrimination is not tolerated. This includes racism, sexism, homophobia, transphobia, ableism, etc. There's a fine line between edgy humour and actual discrimination. Keep it just witty banter, but nothing more. Millions must love.", inline=False)
@@ -310,7 +312,6 @@ class MangodiaBot(commands.Bot):
             rules_embed.add_field(name="🔐 **12. Do not dox, threaten to dox, or share personal details**", value="Any malicious actors who threaten to dox any member of the server. You will be lucky if you only get banned. Discord should never be this serious, and we take the well-being of members of Mangodia seriously.", inline=False)
             rules_embed.add_field(name="⚖️ **13. Follow Discord TOS**", value="I know that none of you have read it, but everyone must comply with the Discord TOS regardless. If you do not comply with Discord TOS in any way then you will be banned.", inline=False)
             rules_embed.set_footer(text="Thank you for your cooperation. • Mangodia Staff Team")
-            rules_embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1234567890123456789.png")
             
             gif_embed = discord.Embed(title="🏃‍♂️ **ATTENTION SPAN BOOSTER**", description="*The average attention span in this server is approximately that of a goldfish so we expect to still be countlessly asked these questions. Here's some Subway Surfers gameplay to keep your attention while you read the FAQ below!*", color=0x4ECDC4)
             gif_embed.set_image(url=random.choice(subway_surfers_gifs))
@@ -326,6 +327,7 @@ class MangodiaBot(commands.Bot):
             await main_message.add_reaction("📜")
             await main_message.add_reaction("🏃‍♂️")
             await main_message.add_reaction("✅")
+            
             await interaction.followup.send("✅ **Setup Complete!**", ephemeral=True)
         except Exception as e:
             logger.error(f"Error in setup command: {e}")
@@ -337,29 +339,33 @@ class MangodiaBot(commands.Bot):
         target_user = user or interaction.user
         await interaction.response.defer()
 
-        invites, leaves = await self.get_user_invites(interaction.guild.id, target_user.id)
-        net_invites = invites - leaves
+        try:
+            invites, leaves = await self.get_user_invites(interaction.guild.id, target_user.id)
+            net_invites = invites - leaves
 
-        async with self.db_pool.acquire() as connection:
-            g25_samples = await connection.fetch('SELECT sample_name, sample_type FROM g25_user_coordinates WHERE user_id = $1 ORDER BY sample_name', target_user.id)
+            async with self.db_pool.acquire() as connection:
+                g25_samples = await connection.fetch('SELECT sample_name, sample_type FROM g25_user_coordinates WHERE user_id = $1 ORDER BY sample_name', target_user.id)
 
-        embed = discord.Embed(title=f"Profile for {target_user.display_name}", color=target_user.color)
-        embed.set_thumbnail(url=target_user.display_avatar.url)
-        
-        invite_info = f"**Net Invites:** {net_invites} (`{invites}` joined, `{leaves}` left)"
-        embed.add_field(name="✉️ Invite Stats", value=invite_info, inline=False)
+            embed = discord.Embed(title=f"Profile for {target_user.display_name}", color=target_user.color)
+            embed.set_thumbnail(url=target_user.display_avatar.url)
+            
+            invite_info = f"**Net Invites:** {net_invites} (`{invites}` joined, `{leaves}` left)"
+            embed.add_field(name="✉️ Invite Stats", value=invite_info, inline=False)
 
-        if g25_samples:
-            g25_info = "\n".join([f"{'👤' if s['sample_type'] == 'Personal' else '🧪'} `{s['sample_name']}`" for s in g25_samples])
-            embed.add_field(name="🧬 Saved G25 Samples", value=g25_info, inline=False)
-        else:
-            embed.add_field(name="🧬 Saved G25 Samples", value="No samples saved yet.", inline=False)
+            if g25_samples:
+                g25_info = "\n".join([f"{'👤' if s['sample_type'] == 'Personal' else '🧪'} `{s['sample_name']}`" for s in g25_samples])
+                embed.add_field(name="🧬 Saved G25 Samples", value=g25_info, inline=False)
+            else:
+                embed.add_field(name="🧬 Saved G25 Samples", value="No samples saved yet.", inline=False)
 
-        user_info = f"**Joined Server:** {discord.utils.format_dt(target_user.joined_at, 'R')}\n"
-        user_info += f"**Account Created:** {discord.utils.format_dt(target_user.created_at, 'R')}"
-        embed.add_field(name="👤 User Information", value=user_info, inline=False)
+            user_info = f"**Joined Server:** {discord.utils.format_dt(target_user.joined_at, 'R')}\n"
+            user_info += f"**Account Created:** {discord.utils.format_dt(target_user.created_at, 'R')}"
+            embed.add_field(name="👤 User Information", value=user_info, inline=False)
 
-        await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Error in profile command: {e}")
+            await interaction.followup.send("❌ An error occurred while fetching the profile.", ephemeral=True)
 
     @app_commands.command(name="add-reward", description="Add a role to be given as an invite reward.")
     @app_commands.describe(role="The role to be awarded.", invites="The number of invites required.")
@@ -370,9 +376,14 @@ class MangodiaBot(commands.Bot):
         if invites < 1:
             await interaction.response.send_message("❌ Invite count must be at least 1.", ephemeral=True)
             return
-        await self.add_guild_reward(interaction.guild.id, role.id, invites)
-        embed = discord.Embed(title="✅ Reward Added", description=f"Users will now get the **{role.name}** role for **{invites}** invites!", color=0x50C878)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        try:
+            await self.add_guild_reward(interaction.guild.id, role.id, invites)
+            embed = discord.Embed(title="✅ Reward Added", description=f"Users will now get the **{role.name}** role for **{invites}** invites!", color=0x50C878)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error in add_reward command: {e}")
+            await interaction.response.send_message("❌ An error occurred while adding the reward.", ephemeral=True)
 
     @app_commands.command(name="remove-reward", description="Remove an invite reward role.")
     @app_commands.describe(role="The reward role to remove.")
@@ -380,52 +391,77 @@ class MangodiaBot(commands.Bot):
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
             return
-        if await self.remove_guild_reward(interaction.guild.id, role.id):
-            embed = discord.Embed(title="✅ Reward Removed", description=f"Reward for role **{role.name}** has been removed.", color=0x50C878)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ That role is not currently set as a reward.", ephemeral=True)
+        
+        try:
+            if await self.remove_guild_reward(interaction.guild.id, role.id):
+                embed = discord.Embed(title="✅ Reward Removed", description=f"Reward for role **{role.name}** has been removed.", color=0x50C878)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ That role is not currently set as a reward.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error in remove_reward command: {e}")
+            await interaction.response.send_message("❌ An error occurred while removing the reward.", ephemeral=True)
 
     @app_commands.command(name="rewards", description="View all current invite rewards.")
     async def rewards(self, interaction: discord.Interaction):
-        rewards = await self.get_guild_rewards(interaction.guild.id)
-        if not rewards:
-            await interaction.response.send_message("❌ No invite rewards are currently set up.", ephemeral=True)
-            return
-        embed = discord.Embed(title="🏆 Invite Rewards", description="Here are all the current invite rewards:", color=0xFFD700)
-        for role_id, required_invites in sorted(rewards.items(), key=lambda x: x[1]):
-            role = interaction.guild.get_role(int(role_id))
-            if role:
-                embed.add_field(name=f"**{role.name}**", value=f"{required_invites} invites", inline=True)
-        await interaction.response.send_message(embed=embed)
+        try:
+            rewards = await self.get_guild_rewards(interaction.guild.id)
+            if not rewards:
+                await interaction.response.send_message("❌ No invite rewards are currently set up.", ephemeral=True)
+                return
+            
+            embed = discord.Embed(title="🏆 Invite Rewards", description="Here are all the current invite rewards:", color=0xFFD700)
+            for role_id, required_invites in sorted(rewards.items(), key=lambda x: x[1]):
+                role = interaction.guild.get_role(int(role_id))
+                if role:
+                    embed.add_field(name=f"**{role.name}**", value=f"{required_invites} invites", inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+        except Exception as e:
+            logger.error(f"Error in rewards command: {e}")
+            await interaction.response.send_message("❌ An error occurred while fetching rewards.", ephemeral=True)
 
     @app_commands.command(name="invites", description="Check how many invites a user has.")
     @app_commands.describe(user="The user to check (optional, defaults to you).")
     async def invites(self, interaction: discord.Interaction, user: discord.Member = None):
         target_user = user or interaction.user
-        invites, leaves = await self.get_user_invites(interaction.guild.id, target_user.id)
-        net_invites = invites - leaves
-        embed = discord.Embed(title=f"📊 Invite Stats for {target_user.display_name}", description=f"**Total Invites:** {net_invites}", color=target_user.color or 0x2F3136)
-        embed.set_thumbnail(url=target_user.display_avatar.url)
-        embed.add_field(name="✅ Successful Invites", value=invites, inline=True)
-        embed.add_field(name="❌ Left Members", value=leaves, inline=True)
-        embed.add_field(name="📈 Net Invites", value=net_invites, inline=True)
-        await interaction.response.send_message(embed=embed)
+        
+        try:
+            invites, leaves = await self.get_user_invites(interaction.guild.id, target_user.id)
+            net_invites = invites - leaves
+            
+            embed = discord.Embed(title=f"📊 Invite Stats for {target_user.display_name}", description=f"**Total Invites:** {net_invites}", color=target_user.color or 0x2F3136)
+            embed.set_thumbnail(url=target_user.display_avatar.url)
+            embed.add_field(name="✅ Successful Invites", value=invites, inline=True)
+            embed.add_field(name="❌ Left Members", value=leaves, inline=True)
+            embed.add_field(name="📈 Net Invites", value=net_invites, inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+        except Exception as e:
+            logger.error(f"Error in invites command: {e}")
+            await interaction.response.send_message("❌ An error occurred while fetching invite stats.", ephemeral=True)
 
     @app_commands.command(name="leaderboard", description="View the top inviters in the server.")
     async def leaderboard(self, interaction: discord.Interaction):
-        users = await self.get_guild_users_leaderboard(interaction.guild.id)
-        if not users:
-            await interaction.response.send_message("❌ No invite data available yet.", ephemeral=True)
-            return
-        embed = discord.Embed(title="🏆 Invite Leaderboard", description="Top inviters in the server:", color=0xFFD700)
-        for i, (user_id, invites, leaves, net_invites) in enumerate(users, 1):
-            member = interaction.guild.get_member(user_id)
-            if member:
-                embed.add_field(name=f"{i}. {member.display_name}", value=f"{net_invites} invites", inline=False)
-        if not embed.fields:
-            embed.description = "No one has any invites yet!"
-        await interaction.response.send_message(embed=embed)
+        try:
+            users = await self.get_guild_users_leaderboard(interaction.guild.id)
+            if not users:
+                await interaction.response.send_message("❌ No invite data available yet.", ephemeral=True)
+                return
+            
+            embed = discord.Embed(title="🏆 Invite Leaderboard", description="Top inviters in the server:", color=0xFFD700)
+            for i, (user_id, invites, leaves, net_invites) in enumerate(users, 1):
+                member = interaction.guild.get_member(user_id)
+                if member:
+                    embed.add_field(name=f"{i}. {member.display_name}", value=f"{net_invites} invites", inline=False)
+            
+            if not embed.fields:
+                embed.description = "No one has any invites yet!"
+            
+            await interaction.response.send_message(embed=embed)
+        except Exception as e:
+            logger.error(f"Error in leaderboard command: {e}")
+            await interaction.response.send_message("❌ An error occurred while fetching the leaderboard.", ephemeral=True)
 
 # --- Create Bot Instance ---
 bot = MangodiaBot()
