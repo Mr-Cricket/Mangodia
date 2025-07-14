@@ -126,20 +126,16 @@ class G25Commands(commands.Cog, name="G25"):
             return
 
         async with self.db_pool.acquire() as connection:
-            # Check if the record already exists to provide better feedback
             existing_record = await connection.fetchval(
                 'SELECT 1 FROM g25_user_coordinates WHERE user_id = $1 AND sample_name = $2',
                 interaction.user.id, name
             )
-
-            # Perform the upsert operation (insert or update)
             await connection.execute('''
                 INSERT INTO g25_user_coordinates (user_id, sample_name, sample_type, coordinates) VALUES ($1, $2, $3, $4)
                 ON CONFLICT (user_id, sample_name) DO UPDATE 
                 SET sample_type = EXCLUDED.sample_type, coordinates = EXCLUDED.coordinates;
             ''', interaction.user.id, name, sample_type, json.dumps(coords))
         
-        # Provide contextual feedback to the user
         if existing_record:
             await interaction.followup.send(f"A sample named '{name}' already existed and has been updated with the new coordinates.")
         else:
@@ -165,7 +161,7 @@ class G25Commands(commands.Cog, name="G25"):
         else:
             await interaction.followup.send(f"Could not find a sample named '{sample_name}' saved under your user.")
 
-    @g25.command(name='distance', description='Calculates genetic distance to a population.')
+    @g25.command(name='distance', description='Calculates genetic distance to a specific population.')
     @app_commands.describe(
         sample_name="The name of the saved sample you want to use.",
         population_name="The exact name of the population from the data file."
@@ -186,6 +182,34 @@ class G25Commands(commands.Cog, name="G25"):
             await interaction.followup.send(f"Genetic distance between **{user_info['name']}** and **{population_name}**: `{dist:.4f}`")
         except KeyError:
             await interaction.followup.send(f"Population '{population_name}' not found. Use `/g25 search` or `/g25 listall` to find the correct name.")
+
+    @g25.command(name='oracle', description='Finds the 20 closest populations to your sample.')
+    @app_commands.describe(sample_name="The name of the saved sample you want to analyze.")
+    async def oracle(self, interaction: discord.Interaction, sample_name: str):
+        await interaction.response.defer()
+        user_info = await self.get_user_coords(interaction.user.id, sample_name)
+        if not user_info:
+            await interaction.followup.send(f"You don't have a saved sample named '{sample_name}'.")
+            return
+        if self.g25_data is None:
+            await interaction.followup.send("G25 population data is still loading, please try again in a moment.")
+            return
+
+        target_coords = user_info['coords']
+        
+        # Calculate distance to all populations in the dataframe
+        distances = self.g25_data.apply(lambda row: calculate_distance(row.values, target_coords), axis=1)
+        
+        # Sort the results and get the top 20
+        closest_pops = distances.sort_values().head(20)
+
+        embed = discord.Embed(title=f"Oracle Results for {user_info['name']}", color=discord.Color.purple())
+        description = "Showing the 20 genetically closest populations:\n\n"
+        for pop_name, dist in closest_pops.items():
+            description += f"**{pop_name}**: `{dist:.4f}`\n"
+        
+        embed.description = description
+        await interaction.followup.send(embed=embed)
 
     @g25.command(name='model', description='Model a sample using source populations and generate a pie chart.')
     @app_commands.describe(
