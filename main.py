@@ -28,6 +28,7 @@ def root():
 # This endpoint will serve the interactive plot HTML
 @api.get("/plot/{plot_id}", response_class=Response)
 async def get_plot(plot_id: str):
+    # This line assumes 'bot' is a globally accessible instance of your MangodiaBot class
     plot_data = bot.pca_plot_data.get(plot_id)
     if not plot_data:
         return Response(content="Plot not found or has expired.", status_code=404)
@@ -85,8 +86,8 @@ class MangodiaBot(commands.Bot):
         await self.init_database()
         await self.load_extension("g25_cog")
         self.loop.create_task(self.run_web_server())
-        
-        # Add commands from the class to the tree
+
+        # Commands must be added to the tree before syncing
         self.tree.add_command(self.setup)
         self.tree.add_command(self.profile)
         self.tree.add_command(self.add_reward)
@@ -95,9 +96,10 @@ class MangodiaBot(commands.Bot):
         self.tree.add_command(self.invites)
         self.tree.add_command(self.leaderboard)
 
+        # Sync should be one of the last things you do in setup_hook
         synced = await self.tree.sync()
         logger.info(f'✅ Synced {len(synced)} command(s)')
-    
+
     async def run_web_server(self):
         config = uvicorn.Config(api, host="0.0.0.0", port=PORT, log_level="warning")
         server = uvicorn.Server(config)
@@ -107,7 +109,7 @@ class MangodiaBot(commands.Bot):
         if self.db_pool:
             await self.db_pool.close()
         await super().close()
-    
+
     async def init_database(self):
         try:
             self.db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
@@ -143,7 +145,7 @@ class MangodiaBot(commands.Bot):
                 await conn.execute("INSERT INTO guilds (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING", guild_id)
         except Exception as e:
             logger.error(f"Error ensuring guild in database: {e}")
-    
+
     async def ensure_user_in_db(self, guild_id, user_id):
         await self.ensure_guild_in_db(guild_id)
         try:
@@ -154,7 +156,7 @@ class MangodiaBot(commands.Bot):
                 """, guild_id, user_id)
         except Exception as e:
             logger.error(f"Error ensuring user in database: {e}")
-    
+
     async def get_user_invites(self, guild_id, user_id):
         try:
             async with self.db_pool.acquire() as conn:
@@ -163,7 +165,7 @@ class MangodiaBot(commands.Bot):
         except Exception as e:
             logger.error(f"Error getting user invites: {e}")
             return (0, 0)
-    
+
     async def update_user_invites(self, guild_id, user_id, invite_change=0, leave_change=0):
         await self.ensure_user_in_db(guild_id, user_id)
         try:
@@ -174,7 +176,7 @@ class MangodiaBot(commands.Bot):
                 """, invite_change, leave_change, guild_id, user_id)
         except Exception as e:
             logger.error(f"Error updating user invites: {e}")
-    
+
     async def get_guild_rewards(self, guild_id):
         try:
             async with self.db_pool.acquire() as conn:
@@ -183,7 +185,7 @@ class MangodiaBot(commands.Bot):
         except Exception as e:
             logger.error(f"Error getting guild rewards: {e}")
             return {}
-    
+
     async def add_guild_reward(self, guild_id, role_id, required_invites):
         await self.ensure_guild_in_db(guild_id)
         try:
@@ -194,7 +196,7 @@ class MangodiaBot(commands.Bot):
                 """, guild_id, role_id, required_invites)
         except Exception as e:
             logger.error(f"Error adding guild reward: {e}")
-    
+
     async def remove_guild_reward(self, guild_id, role_id):
         try:
             async with self.db_pool.acquire() as conn:
@@ -203,7 +205,7 @@ class MangodiaBot(commands.Bot):
         except Exception as e:
             logger.error(f"Error removing guild reward: {e}")
             return False
-    
+
     async def get_guild_users_leaderboard(self, guild_id, limit=10):
         try:
             async with self.db_pool.acquire() as conn:
@@ -220,7 +222,7 @@ class MangodiaBot(commands.Bot):
     # --- Utility Method ---
     def find_invite_by_code(self, invite_list, code):
         return discord.utils.find(lambda i: i.code == code, invite_list)
-    
+
     async def check_rewards(self, member: discord.Member):
         rewards = await self.get_guild_rewards(member.guild.id)
         invites, leaves = await self.get_user_invites(member.guild.id, member.id)
@@ -248,7 +250,7 @@ class MangodiaBot(commands.Bot):
                 logger.warning(f"Don't have permissions to get invites for {guild.name}")
             except Exception as e:
                 logger.error(f"Error caching invites for {guild.name}: {e}")
-    
+
     async def on_member_join(self, member: discord.Member):
         guild = member.guild
         logger.info(f"Member {member.name} joined {guild.name}")
@@ -271,16 +273,16 @@ class MangodiaBot(commands.Bot):
             logger.warning(f"Cannot track invites in {guild.name} due to missing permissions.")
         except Exception as e:
             logger.error(f"Error in on_member_join: {e}")
-    
+
     async def on_member_remove(self, member: discord.Member):
         logger.info(f"Member {member.name} left {member.guild.name}")
-    
+
     async def on_invite_create(self, invite: discord.Invite):
         try:
             self.invites_cache[invite.guild.id] = await invite.guild.invites()
         except Exception as e:
             logger.error(f"Error updating invite cache on create: {e}")
-    
+
     async def on_invite_delete(self, invite: discord.Invite):
         try:
             self.invites_cache[invite.guild.id] = await invite.guild.invites()
@@ -367,7 +369,7 @@ class MangodiaBot(commands.Bot):
             logger.error(f"Error in profile command: {e}")
             await interaction.followup.send("❌ An error occurred while fetching the profile.", ephemeral=True)
 
-    @app_commands.command(name="add-reward", description="Add a role to be given as an invite reward.")
+    @app_commands.command(name="add_reward", description="Add a role to be given as an invite reward.")
     @app_commands.describe(role="The role to be awarded.", invites="The number of invites required.")
     async def add_reward(self, interaction: discord.Interaction, role: discord.Role, invites: int):
         if not interaction.user.guild_permissions.manage_roles:
@@ -377,37 +379,43 @@ class MangodiaBot(commands.Bot):
             await interaction.response.send_message("❌ Invite count must be at least 1.", ephemeral=True)
             return
         
+        await interaction.response.defer(ephemeral=True)
+        
         try:
             await self.add_guild_reward(interaction.guild.id, role.id, invites)
             embed = discord.Embed(title="✅ Reward Added", description=f"Users will now get the **{role.name}** role for **{invites}** invites!", color=0x50C878)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed)
         except Exception as e:
             logger.error(f"Error in add_reward command: {e}")
-            await interaction.response.send_message("❌ An error occurred while adding the reward.", ephemeral=True)
+            await interaction.followup.send("❌ An error occurred while adding the reward.", ephemeral=True)
 
-    @app_commands.command(name="remove-reward", description="Remove an invite reward role.")
+    @app_commands.command(name="remove_reward", description="Remove an invite reward role.")
     @app_commands.describe(role="The reward role to remove.")
     async def remove_reward(self, interaction: discord.Interaction, role: discord.Role):
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
             return
         
+        await interaction.response.defer(ephemeral=True)
+        
         try:
             if await self.remove_guild_reward(interaction.guild.id, role.id):
                 embed = discord.Embed(title="✅ Reward Removed", description=f"Reward for role **{role.name}** has been removed.", color=0x50C878)
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+                await interaction.followup.send(embed=embed)
             else:
-                await interaction.response.send_message("❌ That role is not currently set as a reward.", ephemeral=True)
+                await interaction.followup.send("❌ That role is not currently set as a reward.", ephemeral=True)
         except Exception as e:
             logger.error(f"Error in remove_reward command: {e}")
-            await interaction.response.send_message("❌ An error occurred while removing the reward.", ephemeral=True)
+            await interaction.followup.send("❌ An error occurred while removing the reward.", ephemeral=True)
 
     @app_commands.command(name="rewards", description="View all current invite rewards.")
     async def rewards(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
         try:
             rewards = await self.get_guild_rewards(interaction.guild.id)
             if not rewards:
-                await interaction.response.send_message("❌ No invite rewards are currently set up.", ephemeral=True)
+                await interaction.followup.send("❌ No invite rewards are currently set up.", ephemeral=True)
                 return
             
             embed = discord.Embed(title="🏆 Invite Rewards", description="Here are all the current invite rewards:", color=0xFFD700)
@@ -416,14 +424,16 @@ class MangodiaBot(commands.Bot):
                 if role:
                     embed.add_field(name=f"**{role.name}**", value=f"{required_invites} invites", inline=True)
             
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed)
         except Exception as e:
             logger.error(f"Error in rewards command: {e}")
-            await interaction.response.send_message("❌ An error occurred while fetching rewards.", ephemeral=True)
+            await interaction.followup.send("❌ An error occurred while fetching rewards.", ephemeral=True)
 
     @app_commands.command(name="invites", description="Check how many invites a user has.")
     @app_commands.describe(user="The user to check (optional, defaults to you).")
     async def invites(self, interaction: discord.Interaction, user: discord.Member = None):
+        await interaction.response.defer()
+        
         target_user = user or interaction.user
         
         try:
@@ -436,17 +446,19 @@ class MangodiaBot(commands.Bot):
             embed.add_field(name="❌ Left Members", value=leaves, inline=True)
             embed.add_field(name="📈 Net Invites", value=net_invites, inline=True)
             
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed)
         except Exception as e:
             logger.error(f"Error in invites command: {e}")
-            await interaction.response.send_message("❌ An error occurred while fetching invite stats.", ephemeral=True)
+            await interaction.followup.send("❌ An error occurred while fetching invite stats.", ephemeral=True)
 
     @app_commands.command(name="leaderboard", description="View the top inviters in the server.")
     async def leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
         try:
             users = await self.get_guild_users_leaderboard(interaction.guild.id)
             if not users:
-                await interaction.response.send_message("❌ No invite data available yet.", ephemeral=True)
+                await interaction.followup.send("❌ No invite data available yet.", ephemeral=True)
                 return
             
             embed = discord.Embed(title="🏆 Invite Leaderboard", description="Top inviters in the server:", color=0xFFD700)
@@ -458,10 +470,10 @@ class MangodiaBot(commands.Bot):
             if not embed.fields:
                 embed.description = "No one has any invites yet!"
             
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed)
         except Exception as e:
             logger.error(f"Error in leaderboard command: {e}")
-            await interaction.response.send_message("❌ An error occurred while fetching the leaderboard.", ephemeral=True)
+            await interaction.followup.send("❌ An error occurred while fetching the leaderboard.", ephemeral=True)
 
 # --- Create Bot Instance ---
 bot = MangodiaBot()
