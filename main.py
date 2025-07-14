@@ -25,6 +25,10 @@ api = FastAPI()
 def root():
     return {"status": "Mangodia Bot is alive"}
 
+@api.head("/")
+def head_root():
+    return Response(status_code=200)
+
 # This endpoint will serve the interactive plot HTML
 @api.get("/plot/{plot_id}", response_class=Response)
 async def get_plot(plot_id: str):
