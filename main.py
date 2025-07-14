@@ -20,7 +20,7 @@ PORT = int(os.environ.get('PORT', 8080))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Web Server Setup (for Keep-Alive) ---
+# --- Web Server Setup (for Keep-Alive & Plots) ---
 api = FastAPI()
 @api.get("/")
 def root():
@@ -62,6 +62,12 @@ subway_surfers_gifs = [
     'https://media1.tenor.com/m/j2q3H61aU0cAAAAC/subway-surfers.gif',
     'https://media1.tenor.com/m/qiOmXhm9FnQAAAAC/brian-family-guy-tiktok-funny-clip-tasty-sand.gif',
     'https://media1.tenor.com/m/r_n5-n2cf2IAAAAC/subway-surfer.gif',
+    'https://media0.giphy.com/media/dkUtjuBEdICST5zG7p/giphy.gif',
+    'https://media1.giphy.com/media/Fr5LA2RCQbnVp74CxH/giphy.gif',
+    'https://media2.giphy.com/media/UTemva5AkBntdGyAPM/giphy.gif',
+    'https://media3.giphy.com/media/wc4gc2LmKZOU7bxFcQ/giphy.gif',
+    'https://media1.tenor.com/m/G0yFMh7PL6QAAAAC/speech-bubble-cs-go-surf-surfing.gif',
+    'https://media4.giphy.com/media/fYShjUkJAXW1YO6cNA/giphy.gif'
 ]
 
 class MangodiaBot(commands.Bot):
@@ -233,7 +239,7 @@ class MangodiaBot(commands.Bot):
         logger.info(f'🤖 Logged in as {self.user} (ID: {self.user.id})')
         for guild in self.guilds:
             try:
-                self.invites_cache[guild.id] = await self.fetch_invites(guild.id)
+                self.invites_cache[guild.id] = await guild.invites()
                 await self.ensure_guild_in_db(guild.id)
             except discord.Forbidden:
                 logger.warning(f"Don't have permissions to get invites for {guild.name}")
@@ -282,6 +288,9 @@ class MangodiaBot(commands.Bot):
 bot = MangodiaBot()
 
 # --- COMMANDS ---
+# These are now defined outside the class but attached to the 'bot' instance.
+# This is a common and reliable pattern.
+
 @bot.tree.command(name="setup", description="Posts the server rules and FAQ embeds in the current channel.")
 async def setup(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.manage_messages:
@@ -314,10 +323,10 @@ async def setup(interaction: discord.Interaction):
         faq_embed.add_field(name="🖼️ **How do I get pic perms?**", value="Members who want image perms need to invite five members to the server. Invitations are tracked, and image perms are automatically given when a member invites five members to the server. This helps with growth and helps not to pollute the server with unfunny shitposts.", inline=False)
         faq_embed.add_field(name="🛡️ **How do I become a mod?**", value="We do not accept mod applications. Members will be given mod if Mango or anyone else with role perms likes them. If you aren't annoying and are semi-active, there's a very decent chance you will get mod.", inline=False)
         faq_embed.add_field(name="📋 **How do I appeal?**", value="There is a ticket system where people can send tickets with what punishment they received and a short explanation as to why it was not justified. Mods that repeatedly issue unfair infractions will be reprimanded and could be removed from the mod team.", inline=False)
-        faq_embed.set_footer(text="Still have questions? Don't hesitate to ask in the general chat! �")
+        faq_embed.set_footer(text="Still have questions? Don't hesitate to ask in the general chat! 💬")
         
         main_message = await interaction.channel.send(embeds=[rules_embed, gif_embed, faq_embed])
-        await main_message.add_reaction("📜")
+        await main_message.add_reaction("�")
         await main_message.add_reaction("🏃‍♂️")
         await main_message.add_reaction("✅")
         await interaction.followup.send("✅ **Setup Complete!**", ephemeral=True)
