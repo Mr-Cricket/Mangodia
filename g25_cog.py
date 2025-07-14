@@ -17,6 +17,7 @@ from itertools import combinations
 # --- Helper Functions ---
 
 def calculate_distance(coords1, coords2):
+    # This is kept for single calculations like in /compare
     return np.linalg.norm(np.array(coords1) - np.array(coords2))
 
 def parse_g25_coords(coord_string: str):
@@ -235,22 +236,40 @@ class G25Commands(commands.Cog, name="G25"):
             await interaction.followup.send("G25 population data is still loading, please try again in a moment.")
             return
 
-        target_coords = user_info['coords']
+        target_coords = np.array(user_info['coords'])
         
         embed = discord.Embed(title=f"Oracle Results for {user_info['name']}", color=0x2B2D31)
         
+        all_coords = self.g25_data.values
+        distances_np = np.linalg.norm(all_coords - target_coords, axis=1)
+        distances = pd.Series(distances_np, index=self.g25_data.index)
+
+        # Helper function to paginate long results into multiple embed fields
+        def paginate_results(title: str, results_lines: list[str], embed_to_add: discord.Embed):
+            field_value = "```\n"
+            field_title = title
+            for line in results_lines:
+                if len(field_value) + len(line) + 4 > 1024:
+                    field_value += "```"
+                    embed_to_add.add_field(name=field_title, value=field_value, inline=False)
+                    field_title = "..." # Use a continuation title
+                    field_value = "```\n"
+                field_value += line + "\n"
+            field_value += "```"
+            embed_to_add.add_field(name=field_title, value=field_value, inline=False)
+
+
         if '1-Way' in mode:
-            distances = self.g25_data.apply(lambda row: calculate_distance(row.values, target_coords), axis=1)
             closest_pops = distances.sort_values().head(20)
-            description = "Closest single populations:\n```\n"
-            for pop_name, dist in closest_pops.items():
-                description += f"{dist:<12.8f} {pop_name}\n"
-            description += "```"
-            embed.add_field(name="1-Way Results", value=description, inline=False)
+            lines = [f"{dist:<12.8f} {pop_name}" for pop_name, dist in closest_pops.items()]
+            paginate_results("1-Way Results", lines, embed)
 
         if '2-Way' in mode or '4-Way' in mode:
-            distances = self.g25_data.apply(lambda row: calculate_distance(row.values, target_coords), axis=1)
-            source_pops = distances.sort_values().head(75).index
+            await interaction.edit_original_response(content="This is a complex calculation, please wait...")
+            
+            NUM_SOURCE_POPS = 25 
+            
+            source_pops = distances.sort_values().head(NUM_SOURCE_POPS).index
             source_df = self.g25_data.loc[source_pops]
 
             if '2-Way' in mode:
@@ -264,13 +283,12 @@ class G25Commands(commands.Cog, name="G25"):
                     results_2_way.append({'distance': distance, 'model': combo, 'proportions': result})
                 
                 best_2_way = sorted(results_2_way, key=lambda x: x['distance'])[:15]
-                description = "Closest 2-way population mixes:\n```\n"
+                lines = []
                 for model in best_2_way:
                     props = model['proportions'] * 100
                     model_str = f"{props[0]:.1f}% {model['model'][0]} + {props[1]:.1f}% {model['model'][1]}"
-                    description += f"{model['distance']:<12.8f} {model_str}\n"
-                description += "```"
-                embed.add_field(name="2-Way Results", value=description, inline=False)
+                    lines.append(f"{model['distance']:<12.8f} {model_str}")
+                paginate_results("2-Way Results", lines, embed)
 
             if '4-Way' in mode:
                 results_4_way = []
@@ -283,15 +301,14 @@ class G25Commands(commands.Cog, name="G25"):
                     results_4_way.append({'distance': distance, 'model': combo, 'proportions': result})
                 
                 best_4_way = sorted(results_4_way, key=lambda x: x['distance'])[:15]
-                description = "Closest 4-way population mixes:\n```\n"
+                lines = []
                 for model in best_4_way:
                     props = model['proportions'] * 100
                     model_str = f"{props[0]:.1f}% {model['model'][0]} + {props[1]:.1f}% {model['model'][1]} + {props[2]:.1f}% {model['model'][2]} + {props[3]:.1f}% {model['model'][3]}"
-                    description += f"{model['distance']:<12.8f} {model_str}\n"
-                description += "```"
-                embed.add_field(name="4-Way Results", value=description, inline=False)
+                    lines.append(f"{model['distance']:<12.8f} {model_str}")
+                paginate_results("4-Way Results", lines, embed)
 
-        await interaction.followup.send(embed=embed)
+        await interaction.edit_original_response(content=None, embed=embed)
 
     @g25.command(name='biased', description='Finds populations that one sample is closer to than another.')
     @app_commands.describe(
@@ -311,12 +328,15 @@ class G25Commands(commands.Cog, name="G25"):
             await interaction.followup.send("G25 population data is still loading, please try again in a moment.")
             return
 
-        coords_a, coords_b = info_a['coords'], info_b['coords']
-        diffs = self.g25_data.apply(
-            lambda row: calculate_distance(coords_a, row.values) - calculate_distance(coords_b, row.values),
-            axis=1
-        )
+        coords_a = np.array(info_a['coords'])
+        coords_b = np.array(info_b['coords'])
         
+        all_coords = self.g25_data.values
+        dist_a = np.linalg.norm(all_coords - coords_a, axis=1)
+        dist_b = np.linalg.norm(all_coords - coords_b, axis=1)
+        diffs_np = dist_a - dist_b
+        diffs = pd.Series(diffs_np, index=self.g25_data.index)
+
         closer_to_a = diffs[diffs < 0].sort_values(ascending=True).head(15)
         closer_to_b = diffs[diffs > 0].sort_values(ascending=False).head(15)
 
@@ -324,9 +344,9 @@ class G25Commands(commands.Cog, name="G25"):
         desc_a = f"A: **{sample_a}**\nB: **{sample_b}**\nC: Populations closer to A\n"
         body_a = "```\n" + "\n".join([f"{diff:<12.8f} {pop}" for pop, diff in closer_to_a.items()]) + "```"
         embed_a = discord.Embed(description=desc_a + body_a, color=0x2B2D31)
-        await interaction.followup.send(embed=embed_a)
+        await interaction.edit_original_response(embed=embed_a)
 
-        # Create the second embed
+        # Create the second embed and send as a new message
         desc_b = f"A: **{sample_a}**\nB: **{sample_b}**\nC: Populations closer to B\n"
         body_b = "```\n" + "\n".join([f"{diff:<12.8f} {pop}" for pop, diff in closer_to_b.items()]) + "```"
         embed_b = discord.Embed(description=desc_b + body_b, color=0x2B2D31)
