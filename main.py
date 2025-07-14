@@ -87,11 +87,17 @@ class MangodiaBot(commands.Bot):
         self.pca_plot_data = {}
 
     async def setup_hook(self):
+        # --- TEMPORARY CODE TO FIX COMMANDS ---
+        # This will force-update the commands on your specific server
+        test_guild = discord.Object(id=1390853214735171655)
+        self.tree.copy_global_to(guild=test_guild)
+        await self.tree.sync(guild=test_guild)
+        # --- END OF TEMPORARY CODE ---
+
         await self.init_database()
         await self.load_extension("g25_cog")
         self.loop.create_task(self.run_web_server())
 
-        # Commands must be added to the tree before syncing
         self.tree.add_command(self.setup)
         self.tree.add_command(self.profile)
         self.tree.add_command(self.add_reward)
@@ -100,9 +106,7 @@ class MangodiaBot(commands.Bot):
         self.tree.add_command(self.invites)
         self.tree.add_command(self.leaderboard)
 
-        # Sync should be one of the last things you do in setup_hook
-        synced = await self.tree.sync()
-        logger.info(f'✅ Synced {len(synced)} command(s)')
+        logger.info('Commands forcefully synced to the test guild.')
 
     async def run_web_server(self):
         config = uvicorn.Config(api, host="0.0.0.0", port=PORT, log_level="warning")
