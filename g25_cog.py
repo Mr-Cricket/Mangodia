@@ -385,7 +385,7 @@ class G25Commands(commands.Cog, name="G25"):
         
         await interaction.followup.send(f"Successfully saved model '{model_name}' with {len(pop_list)} populations.")
 
-    @g25.command(name='findmodel', description='Finds the best 2 & 3-way models from a list of source populations.')
+    @g25.command(name='findmodel', description='Finds the best n-way models from a list of source populations.')
     @app_commands.describe(
         target_sample_name="The name of your saved sample to model.",
         source_model="[Optional] The name of a saved model to use as sources.",
@@ -417,7 +417,6 @@ class G25Commands(commands.Cog, name="G25"):
         source_dfs = []
         pop_list = []
 
-        # 1. Get from saved model
         if source_model:
             async with self.db_pool.acquire() as conn:
                 model_pops = await conn.fetchval('SELECT populations FROM g25_saved_models WHERE user_id = $1 AND model_name = $2', interaction.user.id, source_model)
@@ -426,19 +425,16 @@ class G25Commands(commands.Cog, name="G25"):
                 return
             pop_list.extend(model_pops)
 
-        # 2. Get from provided population list
         if source_populations:
             pop_list.extend([name.strip() for name in source_populations.split(',')])
         
-        # Add populations from the main G25 data if any were specified
         if pop_list:
             try:
-                source_dfs.append(self.g25_data.loc[list(set(pop_list))]) # Use set to remove duplicates
+                source_dfs.append(self.g25_data.loc[list(set(pop_list))])
             except KeyError as e:
                 await interaction.followup.send(f"Population '{e.args[0]}' not found in main data.")
                 return
 
-        # 3. Get from user's saved samples
         if saved_source_names:
             saved_names_list = [name.strip() for name in saved_source_names.split(',')]
             saved_samples_data = {}
@@ -452,7 +448,6 @@ class G25Commands(commands.Cog, name="G25"):
             if saved_samples_data:
                 source_dfs.append(pd.DataFrame.from_dict(saved_samples_data, orient='index', columns=self.g25_data.columns))
 
-        # 4. Get from custom string or file
         custom_content = None
         if custom_sources_file:
             try:
@@ -472,62 +467,47 @@ class G25Commands(commands.Cog, name="G25"):
             await interaction.followup.send("You must provide at least one source: `source_model`, `source_populations`, `saved_source_names`, or custom sources.")
             return
 
-        # Combine all sources into one DataFrame
         source_df = pd.concat(source_dfs)
-        source_df = source_df[~source_df.index.duplicated(keep='first')] # Remove any duplicates
+        source_df = source_df[~source_df.index.duplicated(keep='first')]
 
-        if len(source_df) < 3:
-            await interaction.followup.send("Please provide at least 3 unique source populations in total.")
+        if len(source_df) < 6: # Need at least 6 sources for a 6-way model
+            await interaction.followup.send(f"Please provide at least 6 unique source populations in total to run all models. You provided {len(source_df)}.")
             return
         
-        # --- End of Source DataFrame building ---
+        await interaction.edit_original_response(content="Calculating models... this may take a moment.")
         
-        best_2_way = {'distance': float('inf'), 'model': None, 'proportions': None}
-        best_3_way = {'distance': float('inf'), 'model': None, 'proportions': None}
+        # --- Refactored Model Calculation ---
+        best_models = {i: {'distance': float('inf'), 'model': None, 'proportions': None} for i in range(2, 7)}
 
-        for combo in combinations(source_df.index, 2):
-            model_df = source_df.loc[list(combo)]
-            source_matrix = model_df.values.T
-            result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
-            
-            result[result < 0] = 0
-            total = np.sum(result)
-            if total > 0:
-                result = result / total
+        # Loop through model types (2-way, 3-way, etc.)
+        for n_way in range(2, 7):
+            for combo in combinations(source_df.index, n_way):
+                model_df = source_df.loc[list(combo)]
+                source_matrix = model_df.values.T
+                result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
+                
+                result[result < 0] = 0
+                total = np.sum(result)
+                if total > 0:
+                    result = result / total
 
-            fitted_coords = np.dot(source_matrix, result)
-            distance = calculate_distance(target_coords, fitted_coords)
-            if distance < best_2_way['distance']:
-                best_2_way = {'distance': distance, 'model': combo, 'proportions': result}
+                fitted_coords = np.dot(source_matrix, result)
+                distance = calculate_distance(target_coords, fitted_coords)
 
-        for combo in combinations(source_df.index, 3):
-            model_df = source_df.loc[list(combo)]
-            source_matrix = model_df.values.T
-            result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
-
-            result[result < 0] = 0
-            total = np.sum(result)
-            if total > 0:
-                result = result / total
-
-            fitted_coords = np.dot(source_matrix, result)
-            distance = calculate_distance(target_coords, fitted_coords)
-            if distance < best_3_way['distance']:
-                best_3_way = {'distance': distance, 'model': combo, 'proportions': result}
+                if distance < best_models[n_way]['distance']:
+                    best_models[n_way] = {'distance': distance, 'model': combo, 'proportions': result}
 
         embed = discord.Embed(title=f"Best-Fit Models for {target_info['name']}", color=0x2B2D31)
 
-        if best_2_way['model']:
-            props = best_2_way['proportions'] * 100
-            model_str = "\n".join([f"`{props[i]:.2f}%` {name}" for i, name in enumerate(best_2_way['model'])])
-            embed.add_field(name=f"Best 2-Way Model (Distance: {best_2_way['distance']:.4f})", value=model_str, inline=False)
+        for n_way, model_data in best_models.items():
+            if model_data['model']:
+                props = model_data['proportions'] * 100
+                # Dynamically build the model string
+                model_str_parts = [f"`{props[i]:.2f}%` {name}" for i, name in enumerate(model_data['model'])]
+                model_str = "\n".join(model_str_parts)
+                embed.add_field(name=f"Best {n_way}-Way Model (Distance: {model_data['distance']:.4f})", value=model_str, inline=False)
 
-        if best_3_way['model']:
-            props = best_3_way['proportions'] * 100
-            model_str = "\n".join([f"`{props[i]:.2f}%` {name}" for i, name in enumerate(best_3_way['model'])])
-            embed.add_field(name=f"Best 3-Way Model (Distance: {best_3_way['distance']:.4f})", value=model_str, inline=False)
-
-        await interaction.followup.send(embed=embed)
+        await interaction.edit_original_response(content=None, embed=embed)
 
 
 async def setup(bot: commands.Bot):
