@@ -279,12 +279,10 @@ class G25Commands(commands.Cog, name="G25"):
                     source_matrix = model_df.values.T
                     result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
                     
-                    # --- FIX FOR NEGATIVE PERCENTAGES ---
-                    result[result < 0] = 0 # Set negative results to 0
+                    result[result < 0] = 0
                     total = np.sum(result)
                     if total > 0:
-                        result = result / total # Re-normalize to sum to 1
-                    # --- END FIX ---
+                        result = result / total
 
                     fitted_coords = np.dot(source_matrix, result)
                     distance = calculate_distance(target_coords, fitted_coords)
@@ -305,12 +303,10 @@ class G25Commands(commands.Cog, name="G25"):
                     source_matrix = model_df.values.T
                     result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
 
-                    # --- FIX FOR NEGATIVE PERCENTAGES ---
-                    result[result < 0] = 0 # Set negative results to 0
+                    result[result < 0] = 0
                     total = np.sum(result)
                     if total > 0:
-                        result = result / total # Re-normalize to sum to 1
-                    # --- END FIX ---
+                        result = result / total
 
                     fitted_coords = np.dot(source_matrix, result)
                     distance = calculate_distance(target_coords, fitted_coords)
@@ -392,15 +388,19 @@ class G25Commands(commands.Cog, name="G25"):
     @g25.command(name='findmodel', description='Finds the best 2 & 3-way models from a list of source populations.')
     @app_commands.describe(
         target_sample_name="The name of your saved sample to model.",
-        source_model="[EITHER] The name of a saved model to use as sources.",
-        source_populations="[OR] A comma-separated list of potential source populations (max 15)."
+        source_model="[Optional] The name of a saved model to use as sources.",
+        source_populations="[Optional] A comma-separated list of populations from the main data file.",
+        saved_source_names="[Optional] A comma-separated list of your own saved samples to use as sources.",
+        custom_sources_string="[Optional] Custom source populations as a block of text.",
+        custom_sources_file="[Optional] A .txt or .csv file with custom source populations."
     )
-    async def find_model(self, interaction: discord.Interaction, target_sample_name: str, source_model: Optional[str] = None, source_populations: Optional[str] = None):
+    async def find_model(self, interaction: discord.Interaction, target_sample_name: str, 
+                         source_model: Optional[str] = None, 
+                         source_populations: Optional[str] = None,
+                         saved_source_names: Optional[str] = None,
+                         custom_sources_string: Optional[str] = None,
+                         custom_sources_file: Optional[discord.Attachment] = None):
         await interaction.response.defer()
-
-        if not (source_model or source_populations):
-            await interaction.followup.send("You must provide either a `source_model` or `source_populations`.")
-            return
 
         target_info = await self.get_user_coords(interaction.user.id, target_sample_name)
         if not target_info:
@@ -413,27 +413,74 @@ class G25Commands(commands.Cog, name="G25"):
 
         target_coords = np.array(target_info['coords'])
         
+        # --- Build the Source DataFrame from multiple inputs ---
+        source_dfs = []
+        pop_list = []
+
+        # 1. Get from saved model
         if source_model:
             async with self.db_pool.acquire() as conn:
-                pop_list = await conn.fetchval('SELECT populations FROM g25_saved_models WHERE user_id = $1 AND model_name = $2', interaction.user.id, source_model)
-            if not pop_list:
+                model_pops = await conn.fetchval('SELECT populations FROM g25_saved_models WHERE user_id = $1 AND model_name = $2', interaction.user.id, source_model)
+            if not model_pops:
                 await interaction.followup.send(f"Could not find a saved model named '{source_model}'.")
                 return
-        else:
-            pop_list = [name.strip() for name in source_populations.split(',')]
+            pop_list.extend(model_pops)
+
+        # 2. Get from provided population list
+        if source_populations:
+            pop_list.extend([name.strip() for name in source_populations.split(',')])
         
-        if len(pop_list) > 15:
-            await interaction.followup.send("Please provide a maximum of 15 source populations.")
-            return
-        if len(pop_list) < 3:
-            await interaction.followup.send("Please provide at least 3 source populations.")
+        # Add populations from the main G25 data if any were specified
+        if pop_list:
+            try:
+                source_dfs.append(self.g25_data.loc[list(set(pop_list))]) # Use set to remove duplicates
+            except KeyError as e:
+                await interaction.followup.send(f"Population '{e.args[0]}' not found in main data.")
+                return
+
+        # 3. Get from user's saved samples
+        if saved_source_names:
+            saved_names_list = [name.strip() for name in saved_source_names.split(',')]
+            saved_samples_data = {}
+            for name in saved_names_list:
+                sample_info = await self.get_user_coords(interaction.user.id, name)
+                if sample_info:
+                    saved_samples_data[name] = sample_info['coords']
+                else:
+                    await interaction.followup.send(f"Could not find a saved sample of yours named '{name}'.")
+                    return
+            if saved_samples_data:
+                source_dfs.append(pd.DataFrame.from_dict(saved_samples_data, orient='index', columns=self.g25_data.columns))
+
+        # 4. Get from custom string or file
+        custom_content = None
+        if custom_sources_file:
+            try:
+                custom_content = (await custom_sources_file.read()).decode('utf-8')
+            except Exception as e:
+                await interaction.followup.send(f"Error reading custom source file: {e}")
+                return
+        elif custom_sources_string:
+            custom_content = custom_sources_string
+        
+        if custom_content:
+            custom_df = parse_g25_multi(custom_content)
+            if not custom_df.empty:
+                source_dfs.append(custom_df)
+
+        if not source_dfs:
+            await interaction.followup.send("You must provide at least one source: `source_model`, `source_populations`, `saved_source_names`, or custom sources.")
             return
 
-        try:
-            source_df = self.g25_data.loc[pop_list]
-        except KeyError as e:
-            await interaction.followup.send(f"Population '{e.args[0]}' not found.")
+        # Combine all sources into one DataFrame
+        source_df = pd.concat(source_dfs)
+        source_df = source_df[~source_df.index.duplicated(keep='first')] # Remove any duplicates
+
+        if len(source_df) < 3:
+            await interaction.followup.send("Please provide at least 3 unique source populations in total.")
             return
+        
+        # --- End of Source DataFrame building ---
         
         best_2_way = {'distance': float('inf'), 'model': None, 'proportions': None}
         best_3_way = {'distance': float('inf'), 'model': None, 'proportions': None}
@@ -443,12 +490,10 @@ class G25Commands(commands.Cog, name="G25"):
             source_matrix = model_df.values.T
             result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
             
-            # --- FIX FOR NEGATIVE PERCENTAGES ---
             result[result < 0] = 0
             total = np.sum(result)
             if total > 0:
                 result = result / total
-            # --- END FIX ---
 
             fitted_coords = np.dot(source_matrix, result)
             distance = calculate_distance(target_coords, fitted_coords)
@@ -460,12 +505,10 @@ class G25Commands(commands.Cog, name="G25"):
             source_matrix = model_df.values.T
             result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
 
-            # --- FIX FOR NEGATIVE PERCENTAGES ---
             result[result < 0] = 0
             total = np.sum(result)
             if total > 0:
                 result = result / total
-            # --- END FIX ---
 
             fitted_coords = np.dot(source_matrix, result)
             distance = calculate_distance(target_coords, fitted_coords)
