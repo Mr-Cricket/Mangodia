@@ -252,7 +252,7 @@ class G25Commands(commands.Cog, name="G25"):
                 if len(field_value) + len(line) + 4 > 1024:
                     field_value += "```"
                     embed_to_add.add_field(name=field_title, value=field_value, inline=False)
-                    field_title = "..." # Use a continuation title
+                    field_title = f"{title} (cont.)"
                     field_value = "```\n"
                 field_value += line + "\n"
             field_value += "```"
@@ -278,6 +278,14 @@ class G25Commands(commands.Cog, name="G25"):
                     model_df = source_df.loc[list(combo)]
                     source_matrix = model_df.values.T
                     result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
+                    
+                    # --- FIX FOR NEGATIVE PERCENTAGES ---
+                    result[result < 0] = 0 # Set negative results to 0
+                    total = np.sum(result)
+                    if total > 0:
+                        result = result / total # Re-normalize to sum to 1
+                    # --- END FIX ---
+
                     fitted_coords = np.dot(source_matrix, result)
                     distance = calculate_distance(target_coords, fitted_coords)
                     results_2_way.append({'distance': distance, 'model': combo, 'proportions': result})
@@ -296,6 +304,14 @@ class G25Commands(commands.Cog, name="G25"):
                     model_df = source_df.loc[list(combo)]
                     source_matrix = model_df.values.T
                     result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
+
+                    # --- FIX FOR NEGATIVE PERCENTAGES ---
+                    result[result < 0] = 0 # Set negative results to 0
+                    total = np.sum(result)
+                    if total > 0:
+                        result = result / total # Re-normalize to sum to 1
+                    # --- END FIX ---
+
                     fitted_coords = np.dot(source_matrix, result)
                     distance = calculate_distance(target_coords, fitted_coords)
                     results_4_way.append({'distance': distance, 'model': combo, 'proportions': result})
@@ -426,6 +442,14 @@ class G25Commands(commands.Cog, name="G25"):
             model_df = source_df.loc[list(combo)]
             source_matrix = model_df.values.T
             result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
+            
+            # --- FIX FOR NEGATIVE PERCENTAGES ---
+            result[result < 0] = 0
+            total = np.sum(result)
+            if total > 0:
+                result = result / total
+            # --- END FIX ---
+
             fitted_coords = np.dot(source_matrix, result)
             distance = calculate_distance(target_coords, fitted_coords)
             if distance < best_2_way['distance']:
@@ -435,6 +459,14 @@ class G25Commands(commands.Cog, name="G25"):
             model_df = source_df.loc[list(combo)]
             source_matrix = model_df.values.T
             result, _, _, _ = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
+
+            # --- FIX FOR NEGATIVE PERCENTAGES ---
+            result[result < 0] = 0
+            total = np.sum(result)
+            if total > 0:
+                result = result / total
+            # --- END FIX ---
+
             fitted_coords = np.dot(source_matrix, result)
             distance = calculate_distance(target_coords, fitted_coords)
             if distance < best_3_way['distance']:
