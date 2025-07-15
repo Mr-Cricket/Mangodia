@@ -384,7 +384,7 @@ class G25Commands(commands.Cog, name="G25"):
         embed_b = discord.Embed(description=desc_b + body_b, color=0x2B2D31)
         await interaction.followup.send(embed=embed_b)
 
-    @g25.command(name='savemodel', description='Saves a list of populations as a reusable model.')
+    @g25.command(name='save_model', description='Saves a list of populations as a reusable model.')
     @app_commands.describe(model_name="A short name for your model (e.g., 'BronzeAge').", populations="A comma-separated list of source populations.")
     async def save_model(self, interaction: discord.Interaction, model_name: str, populations: str):
         await interaction.response.defer(ephemeral=True)
@@ -405,36 +405,36 @@ class G25Commands(commands.Cog, name="G25"):
         
         await interaction.followup.send(f"Successfully saved model '{model_name}' with {len(pop_list)} populations.")
 
-    @g25.command(name='findmodel', description='Finds the best-fit n-way models from a custom list of sources.')
+    @g25.command(name='model', description='Finds the best-fit n-way models from a custom list of sources.')
     @app_commands.describe(
         target_sample="[Target] The name of your saved sample to model.",
         target_population_name="[Target] The name of a population from the main data file.",
         target_g25_string="[Target] The target sample as a G25 string.",
         target_attachment="[Target] The target sample as a .txt or .csv file.",
-        source_model="[Source] The name of a saved model to use.",
+        source_model="[Source] Your saved model to use as a source list.",
         source_populations="[Source] A comma-separated list of populations from the main data file.",
-        saved_source_names="[Source] A comma-separated list of your own saved samples.",
-        custom_sources_string="[Source] Custom source populations as a block of text.",
-        custom_sources_file="[Source] A .txt or .csv file with custom source populations."
+        source_saved_samples="[Source] A comma-separated list of your own saved samples.",
+        source_custom_string="[Source] Custom source populations as a block of text.",
+        source_custom_file="[Source] A .txt or .csv file with custom source populations."
     )
-    @app_commands.autocomplete(target_sample=sample_autocomplete, source_model=model_autocomplete, saved_source_names=sample_autocomplete)
-    async def find_model(self, interaction: discord.Interaction, 
+    @app_commands.autocomplete(target_sample=sample_autocomplete, source_model=model_autocomplete, source_saved_samples=sample_autocomplete)
+    async def model(self, interaction: discord.Interaction, 
                          target_sample: Optional[str] = None,
                          target_population_name: Optional[str] = None,
                          target_g25_string: Optional[str] = None,
                          target_attachment: Optional[discord.Attachment] = None,
                          source_model: Optional[str] = None, 
                          source_populations: Optional[str] = None,
-                         saved_source_names: Optional[str] = None,
-                         custom_sources_string: Optional[str] = None,
-                         custom_sources_file: Optional[discord.Attachment] = None):
+                         source_saved_samples: Optional[str] = None,
+                         source_custom_string: Optional[str] = None,
+                         source_custom_file: Optional[discord.Attachment] = None):
         await interaction.response.defer()
 
         # --- Get Target Sample ---
         target_info = None
         target_inputs = sum(p is not None for p in [target_sample, target_g25_string, target_attachment, target_population_name])
         if target_inputs != 1:
-            await interaction.followup.send("Please provide exactly one target method: `target_sample`, `target_population_name`, `target_g25_string`, or `target_attachment`.")
+            await interaction.followup.send("❌ **Error:** Please provide exactly one `[Target]` input method.")
             return
 
         if target_sample:
@@ -498,8 +498,8 @@ class G25Commands(commands.Cog, name="G25"):
                 await interaction.followup.send(f"Population '{e.args[0]}' not found in main data.")
                 return
 
-        if saved_source_names:
-            saved_names_list = [name.strip() for name in saved_source_names.split(',')]
+        if source_saved_samples:
+            saved_names_list = [name.strip() for name in source_saved_samples.split(',')]
             saved_samples_data = {}
             for name in saved_names_list:
                 sample_info = await self.get_user_coords(interaction.user.id, name)
@@ -512,14 +512,14 @@ class G25Commands(commands.Cog, name="G25"):
                 source_dfs.append(pd.DataFrame.from_dict(saved_samples_data, orient='index', columns=self.g25_data.columns))
 
         custom_content = None
-        if custom_sources_file:
+        if source_custom_file:
             try:
-                custom_content = (await custom_sources_file.read()).decode('utf-8')
+                custom_content = (await source_custom_file.read()).decode('utf-8')
             except Exception as e:
                 await interaction.followup.send(f"Error reading custom source file: {e}")
                 return
-        elif custom_sources_string:
-            custom_content = custom_sources_string
+        elif source_custom_string:
+            custom_content = source_custom_string
         
         if custom_content:
             custom_df = parse_g25_multi(custom_content)
@@ -527,7 +527,7 @@ class G25Commands(commands.Cog, name="G25"):
                 source_dfs.append(custom_df)
 
         if not source_dfs:
-            await interaction.followup.send("You must provide at least one source: `source_model`, `source_populations`, `saved_source_names`, or custom sources.")
+            await interaction.followup.send("❌ **Error:** Please provide at least one `[Source]` input method.")
             return
 
         source_df = pd.concat(source_dfs)
