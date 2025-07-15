@@ -860,4 +860,4 @@ class G25Commands(commands.Cog, name="G25"):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(G25Commands(bot))" in the document. I want you to change the name of the save_model to save_source_mo
+    await bot.add_cog(G25Commands(bot))
