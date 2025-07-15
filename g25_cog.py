@@ -106,38 +106,40 @@ class G25Commands(commands.Cog, name="G25"):
         return {'name': record['sample_name'], 'coords': json.loads(record['coordinates'])} if record else None
 
     # --- Autocomplete Functions ---
-    async def sample_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    async def single_sample_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+        if not self.db_pool:
+            return []
+        async with self.db_pool.acquire() as conn:
+            records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2", interaction.user.id, f'%{current}%')
+        return [app_commands.Choice(name=r['sample_name'], value=r['sample_name']) for r in records][:25]
+
+    async def multi_sample_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         if not self.db_pool:
             return []
         
-        # Smarter autocomplete for comma-separated values
         parts = current.split(',')
         last_part = parts[-1].strip()
-
+        
         async with self.db_pool.acquire() as conn:
-            # Only search if the user has typed something for the current part
-            if last_part:
-                records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2", interaction.user.id, f'%{last_part}%')
-            else:
-                # If the last part is empty (e.g., after a comma and space), show all samples
-                records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1", interaction.user.id)
-
+            records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2", interaction.user.id, f'%{last_part}%')
+        
         choices = []
-        # Get the prefix (everything before the part we're completing)
         prefix = ','.join(parts[:-1])
         
         for r in records:
             sample_name = r['sample_name']
             
-            # Construct the new value for the input box
             if prefix:
-                # Add a comma and space to prepare for the next entry
-                new_value = f"{prefix.strip()}, {sample_name}, "
+                new_value = f"{prefix.strip()}, {sample_name}"
             else:
-                # For the very first entry
-                new_value = f"{sample_name}, "
-                
-            choices.append(app_commands.Choice(name=sample_name, value=new_value))
+                new_value = sample_name
+            
+            # Add a trailing comma and space if there's room, to make adding the next item easier
+            if len(new_value) < 98:
+                new_value += ", "
+
+            if len(new_value) <= 100:
+                choices.append(app_commands.Choice(name=sample_name, value=new_value))
         
         return choices[:25]
 
@@ -192,7 +194,7 @@ class G25Commands(commands.Cog, name="G25"):
 
     @g25.command(name='removecoords', description='Removes one of your saved G25 samples.')
     @app_commands.describe(sample_name="The exact name of the sample you want to remove.")
-    @app_commands.autocomplete(sample_name=sample_autocomplete)
+    @app_commands.autocomplete(sample_name=single_sample_autocomplete)
     async def remove_coords(self, interaction: discord.Interaction, sample_name: str):
         await interaction.response.defer(ephemeral=True)
         if not self.db_pool:
@@ -231,7 +233,7 @@ class G25Commands(commands.Cog, name="G25"):
 
     @g25.command(name='compare', description='Calculates the genetic distance between two of your saved samples.')
     @app_commands.describe(sample_a="The name of your first saved sample.", sample_b="The name of your second saved sample.")
-    @app_commands.autocomplete(sample_a=sample_autocomplete, sample_b=sample_autocomplete)
+    @app_commands.autocomplete(sample_a=single_sample_autocomplete, sample_b=single_sample_autocomplete)
     async def compare(self, interaction: discord.Interaction, sample_a: str, sample_b: str):
         await interaction.response.defer()
         info_a = await self.get_user_coords(interaction.user.id, sample_a)
@@ -249,7 +251,7 @@ class G25Commands(commands.Cog, name="G25"):
         sample_name="The name of your saved sample to use.",
         population_name="The exact name of the population from the main data file."
     )
-    @app_commands.autocomplete(sample_name=sample_autocomplete)
+    @app_commands.autocomplete(sample_name=single_sample_autocomplete)
     async def distance(self, interaction: discord.Interaction, sample_name: str, population_name: str):
         await interaction.response.defer()
         user_info = await self.get_user_coords(interaction.user.id, sample_name)
@@ -272,7 +274,7 @@ class G25Commands(commands.Cog, name="G25"):
         sample_name="The name of your saved sample to analyze.",
         mode="The type of Oracle model to run."
     )
-    @app_commands.autocomplete(sample_name=sample_autocomplete)
+    @app_commands.autocomplete(sample_name=single_sample_autocomplete)
     async def oracle(self, interaction: discord.Interaction, sample_name: str, mode: Literal['1-Way (Single Population)', '2-Way Population Mix', '4-Way Population Mix']):
         await interaction.response.defer()
         user_info = await self.get_user_coords(interaction.user.id, sample_name)
@@ -374,7 +376,7 @@ class G25Commands(commands.Cog, name="G25"):
         sample_a="The name of your first saved sample.",
         sample_b="The name of the sample you want to compare against."
     )
-    @app_commands.autocomplete(sample_a=sample_autocomplete, sample_b=sample_autocomplete)
+    @app_commands.autocomplete(sample_a=single_sample_autocomplete, sample_b=single_sample_autocomplete)
     async def biased(self, interaction: discord.Interaction, sample_a: str, sample_b: str):
         await interaction.response.defer()
 
@@ -445,7 +447,7 @@ class G25Commands(commands.Cog, name="G25"):
         source_custom_string="[Source] Custom source populations as a block of text.",
         source_custom_file="[Source] A .txt or .csv file with custom source populations."
     )
-    @app_commands.autocomplete(target_sample=sample_autocomplete, source_model=model_autocomplete, source_saved_samples=sample_autocomplete)
+    @app_commands.autocomplete(target_sample=single_sample_autocomplete, source_model=model_autocomplete, source_saved_samples=multi_sample_autocomplete)
     async def model(self, interaction: discord.Interaction, 
                          target_sample: Optional[str] = None,
                          target_population_name: Optional[str] = None,
@@ -527,7 +529,9 @@ class G25Commands(commands.Cog, name="G25"):
                 return
 
         if source_saved_samples:
-            saved_names_list = [name.strip() for name in source_saved_samples.split(',')]
+            # Clean up the trailing comma and space if it exists
+            clean_source_samples = source_saved_samples.strip().rstrip(',')
+            saved_names_list = [name.strip() for name in clean_source_samples.split(',')]
             saved_samples_data = {}
             for name in saved_names_list:
                 sample_info = await self.get_user_coords(interaction.user.id, name)
@@ -607,7 +611,7 @@ class G25Commands(commands.Cog, name="G25"):
         custom_target_string="[Target] A custom target sample as a G25 string.",
         custom_target_file="[Target] A custom target sample as a file."
     )
-    @app_commands.autocomplete(target_saved_sample=sample_autocomplete)
+    @app_commands.autocomplete(target_saved_sample=single_sample_autocomplete)
     async def g25_leaderboard(self, interaction: discord.Interaction, 
                               target_saved_sample: Optional[str] = None,
                               target_population_name: Optional[str] = None, 
@@ -687,7 +691,7 @@ class G25Commands(commands.Cog, name="G25"):
         custom_samples_string="[Optional] Custom samples as a block of text to plot in cyan.",
         custom_samples_file="[Optional] A .txt or .csv file with custom samples to plot in cyan."
     )
-    @app_commands.autocomplete(target_samples=sample_autocomplete)
+    @app_commands.autocomplete(target_samples=multi_sample_autocomplete)
     async def plot(self, interaction: discord.Interaction, 
                    plot_type: Literal['Simple (Image)', 'Advanced (Interactive Link)'],
                    target_samples: Optional[str] = None, 
@@ -714,7 +718,8 @@ class G25Commands(commands.Cog, name="G25"):
 
         # 2. Add user's target samples
         if target_samples:
-            target_names = [name.strip() for name in target_samples.split(',')]
+            clean_target_samples = target_samples.strip().rstrip(',')
+            target_names = [name.strip() for name in clean_target_samples.split(',')]
             for name in target_names:
                 sample_info = await self.get_user_coords(interaction.user.id, name)
                 if sample_info:
