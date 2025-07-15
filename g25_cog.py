@@ -17,7 +17,6 @@ from itertools import combinations
 # --- Helper Functions ---
 
 def calculate_distance(coords1, coords2):
-    # This is kept for single calculations like in /compare
     return np.linalg.norm(np.array(coords1) - np.array(coords2))
 
 def parse_g25_coords(coord_string: str):
@@ -104,6 +103,21 @@ class G25Commands(commands.Cog, name="G25"):
         async with self.db_pool.acquire() as connection:
             record = await connection.fetchrow('SELECT sample_name, coordinates FROM g25_user_coordinates WHERE user_id = $1 AND sample_name = $2', user_id, sample_name)
         return {'name': record['sample_name'], 'coords': json.loads(record['coordinates'])} if record else None
+
+    # Helper function to paginate long results into multiple embed fields
+    def paginate_results(self, title: str, results_lines: list[str], embed_to_add: discord.Embed):
+        field_value = "```\n"
+        field_title = title
+        for line in results_lines:
+            if len(field_value) + len(line) + 4 > 1024:
+                field_value += "```"
+                embed_to_add.add_field(name=field_title, value=field_value, inline=False)
+                field_title = f"{title} (cont.)"
+                field_value = "```\n"
+            field_value += line + "\n"
+        field_value += "```"
+        embed_to_add.add_field(name=field_title, value=field_value, inline=False)
+
 
     g25 = app_commands.Group(name="g25", description="Commands for G25 genetic analysis.")
 
@@ -244,25 +258,10 @@ class G25Commands(commands.Cog, name="G25"):
         distances_np = np.linalg.norm(all_coords - target_coords, axis=1)
         distances = pd.Series(distances_np, index=self.g25_data.index)
 
-        # Helper function to paginate long results into multiple embed fields
-        def paginate_results(title: str, results_lines: list[str], embed_to_add: discord.Embed):
-            field_value = "```\n"
-            field_title = title
-            for line in results_lines:
-                if len(field_value) + len(line) + 4 > 1024:
-                    field_value += "```"
-                    embed_to_add.add_field(name=field_title, value=field_value, inline=False)
-                    field_title = f"{title} (cont.)"
-                    field_value = "```\n"
-                field_value += line + "\n"
-            field_value += "```"
-            embed_to_add.add_field(name=field_title, value=field_value, inline=False)
-
-
         if '1-Way' in mode:
             closest_pops = distances.sort_values().head(20)
             lines = [f"{dist:<12.8f} {pop_name}" for pop_name, dist in closest_pops.items()]
-            paginate_results("1-Way Results", lines, embed)
+            self.paginate_results("1-Way Results", lines, embed)
 
         if '2-Way' in mode or '4-Way' in mode:
             await interaction.edit_original_response(content="This is a complex calculation, please wait...")
@@ -294,7 +293,7 @@ class G25Commands(commands.Cog, name="G25"):
                     props = model['proportions'] * 100
                     model_str = f"{props[0]:.1f}% {model['model'][0]} + {props[1]:.1f}% {model['model'][1]}"
                     lines.append(f"{model['distance']:<12.8f} {model_str}")
-                paginate_results("2-Way Results", lines, embed)
+                self.paginate_results("2-Way Results", lines, embed)
 
             if '4-Way' in mode:
                 results_4_way = []
@@ -318,7 +317,7 @@ class G25Commands(commands.Cog, name="G25"):
                     props = model['proportions'] * 100
                     model_str = f"{props[0]:.1f}% {model['model'][0]} + {props[1]:.1f}% {model['model'][1]} + {props[2]:.1f}% {model['model'][2]} + {props[3]:.1f}% {model['model'][3]}"
                     lines.append(f"{model['distance']:<12.8f} {model_str}")
-                paginate_results("4-Way Results", lines, embed)
+                self.paginate_results("4-Way Results", lines, embed)
 
         await interaction.edit_original_response(content=None, embed=embed)
 
@@ -385,37 +384,52 @@ class G25Commands(commands.Cog, name="G25"):
         
         await interaction.followup.send(f"Successfully saved model '{model_name}' with {len(pop_list)} populations.")
 
-    @g25.command(name='findmodel', description='Finds the best n-way models from a list of source populations.')
+    # --- REFACETORED FIND MODEL TO USE NESTED STRUCTURE (COMMAND GROUP) ---
+    findmodel_group = app_commands.Group(name="findmodel", description="Finds the best n-way models from provided targets and sources.")
+
+    @findmodel_group.command(name="run", description="Run a multi-way admixture model.")
     @app_commands.describe(
-        # Renamed target_sample_name to target_sample and made it optional
-        target_sample="[Optional] The name of your saved sample to model.",
-        target_g25_string="[Optional] Your target coordinates as a comma-separated string.", # New argument
-        target_attachment="[Optional] Your target coordinates as a .csv or .txt file.", # New argument
-        source_model="[Optional] The name of a saved model to use as sources.",
-        source_populations="[Optional] A comma-separated list of populations from the main data file.",
-        saved_source_names="[Optional] A comma-separated list of your own saved samples to use as sources.",
-        custom_sources_string="[Optional] Custom source populations as a block of text.",
-        custom_sources_file="[Optional] A .txt or .csv file with custom source populations."
+        # --- TARGET OPTIONS (grouped logically by description and order) ---
+        target_saved_sample="[Target Input] Use the name of your saved sample.",
+        target_g25_string="[Target Input] Paste your target coordinates as a comma-separated string.",
+        target_attachment="[Target Input] Upload your target coordinates as a .csv or .txt file.",
+        
+        # --- SOURCE OPTIONS (grouped logically by description and new naming) ---
+        source_model="[Source Input] Use the name of a previously saved source model.",
+        source_populations="[Source Input] A comma-separated list of populations from the main data file.",
+        source_saved_samples="[Source Input] A comma-separated list of your own saved samples to use as sources.",
+        source_custom_string="[Source Input] Paste custom source populations as a block of text (Name,PC1,PC2...).",
+        source_custom_file="[Source Input] Upload a .txt or .csv file with custom source populations.",
     )
-    async def find_model(self, interaction: discord.Interaction,
-                         target_sample: Optional[str] = None,
-                         target_g25_string: Optional[str] = None, # Added
-                         target_attachment: Optional[discord.Attachment] = None, # Added
-                         source_model: Optional[str] = None, 
-                         source_populations: Optional[str] = None,
-                         saved_source_names: Optional[str] = None,
-                         custom_sources_string: Optional[str] = None,
-                         custom_sources_file: Optional[discord.Attachment] = None):
+    async def find_model_run(self, interaction: discord.Interaction,
+                            target_saved_sample: Optional[str] = None,
+                            target_g25_string: Optional[str] = None, 
+                            target_attachment: Optional[discord.Attachment] = None, 
+                            source_model: Optional[str] = None, 
+                            source_populations: Optional[str] = None,
+                            source_saved_samples: Optional[str] = None, # Renamed
+                            source_custom_string: Optional[str] = None, # Renamed
+                            source_custom_file: Optional[discord.Attachment] = None): # Renamed
         await interaction.response.defer()
 
-        target_info = None # Initialize target_info to None
-        target_name = "Your Sample" # Default name for display if not a saved sample
+        target_info = None 
+        target_name = "Your Sample" 
 
         # --- Handle Target Sample Input ---
+        # Prioritize attachment, then string, then saved sample
+        input_methods = [target_attachment, target_g25_string, target_saved_sample]
+        provided_inputs = [arg for arg in input_methods if arg is not None]
+
+        if len(provided_inputs) > 1:
+            await interaction.followup.send("Please provide only ONE target input method (saved sample, G25 string, or attachment).")
+            return
+        elif not provided_inputs:
+            await interaction.followup.send("You must provide a target sample either by name, a G25 string, or an attachment.")
+            return
+
         if target_attachment:
             try:
                 target_content = (await target_attachment.read()).decode('utf-8')
-                # Parse single coordinate string from the attachment
                 parsed_name, parsed_coords = parse_g25_coords(target_content.strip().split('\n')[0])
                 if parsed_name and parsed_coords:
                     target_info = {'name': parsed_name, 'coords': parsed_coords}
@@ -434,19 +448,15 @@ class G25Commands(commands.Cog, name="G25"):
             else:
                 await interaction.followup.send("Invalid G25 format for target string. Please use: `SampleName,coord1,...`")
                 return
-        elif target_sample: # This is the original method: saved sample name
-            target_info = await self.get_user_coords(interaction.user.id, target_sample)
+        elif target_saved_sample: 
+            target_info = await self.get_user_coords(interaction.user.id, target_saved_sample)
             if target_info:
-                target_name = target_info['name'] # Use the actual name from the saved sample
+                target_name = target_info['name'] 
             else:
-                await interaction.followup.send(f"You don't have a saved sample named '{target_sample}'.")
+                await interaction.followup.send(f"You don't have a saved sample named '{target_saved_sample}'.")
                 return
-        else:
-            await interaction.followup.send("You must provide a target sample either by name, a G25 string, or an attachment.")
-            return
-
-        # Ensure we have a target_coords after processing input
-        if not target_info:
+        
+        if not target_info: # Double check if target info was successfully obtained
             await interaction.followup.send("Could not determine target coordinates. Please provide valid input.")
             return
             
@@ -459,6 +469,12 @@ class G25Commands(commands.Cog, name="G25"):
         # --- Build the Source DataFrame from multiple inputs ---
         source_dfs = []
         pop_list = []
+
+        # Check if any source input was provided
+        source_inputs_provided = any([source_model, source_populations, source_saved_samples, source_custom_string, source_custom_file])
+        if not source_inputs_provided:
+            await interaction.followup.send("You must provide at least one source for the model.")
+            return
 
         if source_model:
             async with self.db_pool.acquire() as conn:
@@ -473,14 +489,13 @@ class G25Commands(commands.Cog, name="G25"):
         
         if pop_list:
             try:
-                # Use a set to avoid duplicate populations if they come from different sources
                 source_dfs.append(self.g25_data.loc[list(set(pop_list))])
             except KeyError as e:
                 await interaction.followup.send(f"Population '{e.args[0]}' not found in main data. Please check spelling.")
                 return
 
-        if saved_source_names:
-            saved_names_list = [name.strip() for name in saved_source_names.split(',')]
+        if source_saved_samples: # Renamed
+            saved_names_list = [name.strip() for name in source_saved_samples.split(',')]
             saved_samples_data = {}
             for name in saved_names_list:
                 sample_info = await self.get_user_coords(interaction.user.id, name)
@@ -493,44 +508,40 @@ class G25Commands(commands.Cog, name="G25"):
                 source_dfs.append(pd.DataFrame.from_dict(saved_samples_data, orient='index', columns=self.g25_data.columns))
 
         custom_content = None
-        if custom_sources_file:
+        if source_custom_file: # Renamed
             try:
-                custom_content = (await custom_sources_file.read()).decode('utf-8')
+                custom_content = (await source_custom_file.read()).decode('utf-8')
             except Exception as e:
                 await interaction.followup.send(f"Error reading custom source file: {e}")
                 return
-        elif custom_sources_string:
-            custom_content = custom_sources_string
+        elif source_custom_string: # Renamed
+            custom_content = source_custom_string
         
         if custom_content:
             custom_df = parse_g25_multi(custom_content)
             if not custom_df.empty:
                 source_dfs.append(custom_df)
-            else: # Added error handling for empty/invalid custom sources
+            else: 
                 await interaction.followup.send("No valid G25 coordinates found in custom source string/file.")
                 return
 
-
         if not source_dfs:
-            await interaction.followup.send("You must provide at least one source for the model: `source_model`, `source_populations`, `saved_source_names`, or custom sources.")
+            # This check is technically redundant due to the earlier 'source_inputs_provided' check, but good for clarity
+            await interaction.followup.send("No valid source populations were provided or found from your inputs.")
             return
 
         source_df = pd.concat(source_dfs)
         source_df = source_df[~source_df.index.duplicated(keep='first')]
 
-        if len(source_df) < 2: # Changed from 6 to 2, as 2-way is the minimum.
+        if len(source_df) < 2: 
              await interaction.followup.send(f"Please provide at least 2 unique source populations in total to run models. You provided {len(source_df)}.")
              return
         
         await interaction.edit_original_response(content="Calculating models... this may take a moment.")
         
-        # --- Refactored Model Calculation ---
-        # The range is still 2 to 7 (for 2-way to 6-way models)
         best_models = {i: {'distance': float('inf'), 'model': None, 'proportions': None} for i in range(2, 7)}
 
-        # Loop through model types (2-way, 3-way, etc.)
         for n_way in range(2, 7):
-            # Skip if we don't have enough source populations for this n_way
             if len(source_df) < n_way:
                 continue 
 
@@ -538,18 +549,15 @@ class G25Commands(commands.Cog, name="G25"):
                 model_df = source_df.loc[list(combo)]
                 source_matrix = model_df.values.T
                 
-                # Check for singular matrix (linear dependence) - common with too few/collinear sources
-                # Wrap lstsq in try-except for robustness
                 try:
                     result, residuals, rank, s = np.linalg.lstsq(source_matrix, target_coords, rcond=None)
                 except np.linalg.LinAlgError:
-                    # This can happen if source populations are linearly dependent (e.g., identical or on a line)
-                    continue # Skip this combination
+                    continue 
 
                 result[result < 0] = 0
                 total = np.sum(result)
                 if total > 0:
-                    result = result / total # Normalize proportions to sum to 1
+                    result = result / total 
 
                 fitted_coords = np.dot(source_matrix, result)
                 distance = calculate_distance(target_coords, fitted_coords)
@@ -557,20 +565,194 @@ class G25Commands(commands.Cog, name="G25"):
                 if distance < best_models[n_way]['distance']:
                     best_models[n_way] = {'distance': distance, 'model': combo, 'proportions': result}
 
-        embed = discord.Embed(title=f"Best-Fit Models for {target_name}", color=0x2B2D31) # Use target_name here
+        embed = discord.Embed(title=f"Best-Fit Models for {target_name}", color=0x2B2D31) 
 
         found_any_model = False
         for n_way, model_data in best_models.items():
             if model_data['model']:
                 found_any_model = True
                 props = model_data['proportions'] * 100
-                # Dynamically build the model string
                 model_str_parts = [f"`{props[i]:.2f}%` {name}" for i, name in enumerate(model_data['model'])]
                 model_str = "\n".join(model_str_parts)
                 embed.add_field(name=f"Best {n_way}-Way Model (Distance: {model_data['distance']:.4f})", value=model_str, inline=False)
         
         if not found_any_model:
             embed.description = "Could not find any suitable models with the provided sources. Ensure you have enough unique source populations and that your target coordinates are valid."
+
+        await interaction.edit_original_response(content=None, embed=embed)
+
+    @g25.command(name='biased', description='Finds populations that one sample is closer to than another.')
+    @app_commands.describe(
+        sample_a="The name of your primary saved sample.",
+        sample_b="The name of the sample you want to compare against."
+    )
+    async def biased(self, interaction: discord.Interaction, sample_a: str, sample_b: str):
+        await interaction.response.defer()
+
+        info_a = await self.get_user_coords(interaction.user.id, sample_a)
+        info_b = await self.get_user_coords(interaction.user.id, sample_b)
+
+        if not info_a or not info_b:
+            await interaction.followup.send("Could not find one or both of the specified samples.")
+            return
+        if self.g25_data is None:
+            await interaction.followup.send("G25 population data is still loading, please try again in a moment.")
+            return
+
+        coords_a = np.array(info_a['coords'])
+        coords_b = np.array(info_b['coords'])
+        
+        all_coords = self.g25_data.values
+        dist_a = np.linalg.norm(all_coords - coords_a, axis=1)
+        dist_b = np.linalg.norm(all_coords - coords_b, axis=1)
+        diffs_np = dist_a - dist_b
+        diffs = pd.Series(diffs_np, index=self.g25_data.index)
+
+        closer_to_a = diffs[diffs < 0].sort_values(ascending=True).head(15)
+        closer_to_b = diffs[diffs > 0].sort_values(ascending=False).head(15)
+
+        # Create the first embed
+        desc_a = f"A: **{sample_a}**\nB: **{sample_b}**\nC: Populations closer to A\n"
+        body_a = "```\n" + "\n".join([f"{diff:<12.8f} {pop}" for pop, diff in closer_to_a.items()]) + "```"
+        embed_a = discord.Embed(description=desc_a + body_a, color=0x2B2D31)
+        await interaction.edit_original_response(embed=embed_a)
+
+        # Create the second embed and send as a new message
+        desc_b = f"A: **{sample_a}**\nB: **{sample_b}**\nC: Populations closer to B\n"
+        body_b = "```\n" + "\n".join([f"{diff:<12.8f} {pop}" for pop, diff in closer_to_b.items()]) + "```"
+        embed_b = discord.Embed(description=desc_b + body_b, color=0x2B2D31)
+        await interaction.followup.send(embed=embed_b)
+
+    @g25.command(name='leaderboard', description='Generates a leaderboard of personal samples closest to a target.')
+    @app_commands.describe(
+        target_saved_sample="[Optional] The name of your saved sample to use as the target.",
+        target_g25_string="[Optional] Your target coordinates as a comma-separated string.",
+        target_attachment="[Optional] Your target coordinates as a .csv or .txt file.",
+        target_population="[Optional] The name of a population from the main G25 data file to use as the target.", # ADDED THIS OPTION
+        top_n="The number of top results to display (default: 15, max: 50)."
+    )
+    async def leaderboard(self, interaction: discord.Interaction,
+                          target_saved_sample: Optional[str] = None, # Changed name for consistency
+                          target_g25_string: Optional[str] = None,
+                          target_attachment: Optional[discord.Attachment] = None,
+                          target_population: Optional[str] = None, # ADDED THIS PARAMETER
+                          top_n: app_commands.Range[int, 1, 50] = 15): 
+        await interaction.response.defer()
+
+        target_info = None
+        target_name = "Provided Target" 
+
+        # --- Handle Target Input for Leaderboard ---
+        # Ensure only one target input is provided
+        input_methods = [target_saved_sample, target_g25_string, target_attachment, target_population]
+        provided_inputs = [arg for arg in input_methods if arg is not None]
+
+        if len(provided_inputs) > 1:
+            await interaction.followup.send("Please provide only ONE target input method (saved sample, G25 string, attachment, or population from main data).")
+            return
+        elif not provided_inputs:
+            await interaction.followup.send("You must provide a target sample or population to generate the leaderboard.")
+            return
+
+        if target_attachment:
+            try:
+                target_content = (await target_attachment.read()).decode('utf-8')
+                parsed_name, parsed_coords = parse_g25_coords(target_content.strip().split('\n')[0])
+                if parsed_name and parsed_coords:
+                    target_info = {'name': parsed_name, 'coords': parsed_coords}
+                    target_name = parsed_name
+                else:
+                    await interaction.followup.send("Invalid G25 format in target attachment. Please use: `SampleName,coord1,...`")
+                    return
+            except Exception as e:
+                await interaction.followup.send(f"Error reading target attachment: {e}")
+                return
+        elif target_g25_string:
+            parsed_name, parsed_coords = parse_g25_coords(target_g25_string)
+            if parsed_name and parsed_coords:
+                target_info = {'name': parsed_name, 'coords': parsed_coords}
+                target_name = parsed_name
+            else:
+                await interaction.followup.send("Invalid G25 format for target string. Please use: `SampleName,coord1,...`")
+                return
+        elif target_saved_sample:
+            target_info = await self.get_user_coords(interaction.user.id, target_saved_sample)
+            if target_info:
+                target_name = target_info['name']
+            else:
+                await interaction.followup.send(f"You don't have a saved sample named '{target_saved_sample}'.")
+                return
+        elif target_population: # NEW LOGIC for target_population
+            if self.g25_data is None:
+                await interaction.followup.send("G25 population data is still loading, please try again in a moment.")
+                return
+            try:
+                pop_coords = self.g25_data.loc[target_population].values.tolist() # .tolist() to match JSON format
+                target_info = {'name': target_population, 'coords': pop_coords}
+                target_name = target_population
+            except KeyError:
+                await interaction.followup.send(f"Population '{target_population}' not found in the main G25 data. Please check spelling.")
+                return
+        
+        if not target_info:
+            await interaction.followup.send("Could not determine target coordinates. Please provide valid input.")
+            return
+
+        target_coords = np.array(target_info['coords'])
+
+        if not self.db_pool:
+            await interaction.followup.send("Database connection is not available.")
+            return
+
+        # --- Fetch ALL 'Personal' Samples from the database ---
+        personal_samples = await self.db_pool.fetch('SELECT user_id, sample_name, coordinates FROM g25_user_coordinates WHERE sample_type = $1', 'Personal')
+
+        if not personal_samples:
+            await interaction.followup.send("No 'Personal' samples found in the database to generate a leaderboard.")
+            return
+
+        results = []
+        user_cache = {} # Cache for user objects (user ID to display name)
+
+        await interaction.edit_original_response(content="Calculating distances and fetching user names for the leaderboard...")
+
+        for record in personal_samples:
+            sample_coords = json.loads(record['coordinates'])
+            distance = calculate_distance(target_coords, sample_coords)
+            
+            user_id = record['user_id']
+            if user_id not in user_cache:
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                    user_cache[user_id] = user.display_name if user else f"Unknown User ({user_id})"
+                except discord.NotFound:
+                    user_cache[user_id] = f"User Left ({user_id})"
+                except Exception as e:
+                    user_cache[user_id] = f"Error Fetching User ({user_id})"
+                    print(f"Error fetching user {user_id}: {e}") # Log unexpected errors
+
+            username = user_cache[user_id]
+
+            results.append({
+                'distance': distance,
+                'sample_name': record['sample_name'],
+                'user_name': username,
+                'user_id': record['user_id'] # Keep ID for debugging/uniqueness
+            })
+
+        # Sort by distance (closest first)
+        sorted_results = sorted(results, key=lambda x: x['distance'])
+
+        leaderboard_lines = []
+        for i, entry in enumerate(sorted_results[:top_n]):
+            leaderboard_lines.append(f"{i+1}. `{entry['distance']:.4f}` | {entry['user_name']} ({entry['sample_name']})")
+        
+        embed = discord.Embed(
+            title=f"G25 Leaderboard for: {target_name}",
+            description=f"Top {len(leaderboard_lines)} 'Personal' samples closest to the target.\n\n" + "```\n" + "\n".join(leaderboard_lines) + "```",
+            color=0x2B2D31
+        )
+        embed.set_footer(text="Distances are Euclidean.")
 
         await interaction.edit_original_response(content=None, embed=embed)
 
