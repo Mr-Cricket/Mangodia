@@ -109,9 +109,24 @@ class G25Commands(commands.Cog, name="G25"):
     async def sample_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         if not self.db_pool:
             return []
+        
+        # Smarter autocomplete for comma-separated values
+        last_part = current.split(',')[-1].strip()
+        
         async with self.db_pool.acquire() as conn:
-            records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2", interaction.user.id, f'%{current}%')
-        return [app_commands.Choice(name=r['sample_name'], value=r['sample_name']) for r in records][:25]
+            records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2", interaction.user.id, f'%{last_part}%')
+        
+        choices = []
+        for r in records:
+            # To make it easier to select multiple, we construct the full string
+            prefix = ','.join(current.split(',')[:-1])
+            if prefix and not current.endswith(','):
+                value = f"{prefix.strip()}, {r['sample_name']}"
+            else:
+                value = r['sample_name']
+            choices.append(app_commands.Choice(name=r['sample_name'], value=value))
+        
+        return choices[:25]
 
     async def model_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         if not self.db_pool:
