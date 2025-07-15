@@ -111,20 +111,33 @@ class G25Commands(commands.Cog, name="G25"):
             return []
         
         # Smarter autocomplete for comma-separated values
-        last_part = current.split(',')[-1].strip()
-        
+        parts = current.split(',')
+        last_part = parts[-1].strip()
+
         async with self.db_pool.acquire() as conn:
-            records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2", interaction.user.id, f'%{last_part}%')
-        
-        choices = []
-        for r in records:
-            # To make it easier to select multiple, we construct the full string
-            prefix = ','.join(current.split(',')[:-1])
-            if prefix and not current.endswith(','):
-                value = f"{prefix.strip()}, {r['sample_name']}"
+            # Only search if the user has typed something for the current part
+            if last_part:
+                records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2", interaction.user.id, f'%{last_part}%')
             else:
-                value = r['sample_name']
-            choices.append(app_commands.Choice(name=r['sample_name'], value=value))
+                # If the last part is empty (e.g., after a comma and space), show all samples
+                records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1", interaction.user.id)
+
+        choices = []
+        # Get the prefix (everything before the part we're completing)
+        prefix = ','.join(parts[:-1])
+        
+        for r in records:
+            sample_name = r['sample_name']
+            
+            # Construct the new value for the input box
+            if prefix:
+                # Add a comma and space to prepare for the next entry
+                new_value = f"{prefix.strip()}, {sample_name}, "
+            else:
+                # For the very first entry
+                new_value = f"{sample_name}, "
+                
+            choices.append(app_commands.Choice(name=sample_name, value=new_value))
         
         return choices[:25]
 
@@ -847,4 +860,4 @@ class G25Commands(commands.Cog, name="G25"):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(G25Commands(bot))
+    await bot.add_cog(G25Commands(bot))" in the document. I want you to change the name of the save_model to save_source_mo
