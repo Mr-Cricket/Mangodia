@@ -45,11 +45,13 @@ def parse_g25_multi(coord_block: str):
 
 
 class G25Commands(commands.Cog, name="G25"):
-    """Commands for Global 25 genetic ancestry analysis."""
     def __init__(self, bot):
         self.bot = bot
         self.db_pool = None
         self.g25_data = None
+        # This is a placeholder for the plot data.
+        # In a real bot, you need a cleanup mechanism for this (e.g., a TTL cache).
+        self.bot.pca_plot_data = {}
         self.bot.loop.create_task(self.load_data_async())
         self.bot.loop.create_task(self.connect_to_db())
 
@@ -114,35 +116,57 @@ class G25Commands(commands.Cog, name="G25"):
         return [app_commands.Choice(name=r['sample_name'], value=r['sample_name']) for r in records][:25]
 
     async def multi_sample_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+        """
+        Provides autocomplete for multiple, comma-separated sample names.
+        This version uses a simplified, more robust parsing logic that does not automatically add a trailing comma,
+        making it more resilient to Discord client inconsistencies.
+        """
         if not self.db_pool:
             return []
+
+        # 1. Cleanly parse the input. Filter out any empty items that result from extra commas.
+        parts = [p.strip() for p in current.split(',') if p.strip()]
+
+        # 2. Determine what the user is currently typing.
+        # If the input string is empty or ends with a comma, the user is starting a new search.
+        # Otherwise, the last item in our `parts` list is the active search term.
+        last_part_is_active_search = current and not current.endswith(',')
         
-        parts = [p.strip() for p in current.split(',')]
-        
-        if current.endswith(','):
-            already_selected = [p for p in parts if p]
-            last_part = ''
+        active_search_term = ""
+        already_selected = []
+
+        if last_part_is_active_search:
+            active_search_term = parts[-1]
+            already_selected = parts[:-1]
         else:
-            already_selected = [p for p in parts[:-1] if p]
-            last_part = parts[-1]
+            # User is starting a new term, so all parsed parts are considered "selected".
+            already_selected = parts
 
         choices = []
         async with self.db_pool.acquire() as conn:
+            # 3. Fetch all potential matches from the database for the active search term.
             query = "SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2"
-            records = await conn.fetch(query, interaction.user.id, f'%{last_part}%')
+            records = await conn.fetch(query, interaction.user.id, f'%{active_search_term}%')
 
             for record in records:
                 sample_name = record['sample_name']
-                
+
+                # 4. Manually filter out any suggestions that are already in the selected list.
+                #    This is more reliable than complex SQL and makes the logic clearer.
                 if sample_name in already_selected:
                     continue
 
+                # 5. Construct the new value. It's simply the list of old items plus the new one.
+                #    We DO NOT add a trailing comma here. The user will type the next comma themselves.
+                #    This is the key change that makes the process more robust.
                 new_parts = already_selected + [sample_name]
-                new_value = ', '.join(new_parts) + ', '
-                
+                new_value = ', '.join(new_parts)
+
+                # 6. Add the choice if it fits within Discord's limits.
                 if len(new_value) <= 100:
                     choices.append(app_commands.Choice(name=sample_name, value=new_value))
                 else:
+                    # Stop if the next choice would be too long.
                     break
         
         return choices[:25]
@@ -154,6 +178,7 @@ class G25Commands(commands.Cog, name="G25"):
             records = await conn.fetch("SELECT model_name FROM g25_saved_models WHERE user_id = $1 AND model_name ILIKE $2", interaction.user.id, f'%{current}%')
         return [app_commands.Choice(name=r['model_name'], value=r['model_name']) for r in records][:25]
 
+    # ... The rest of your G25Commands class remains the same ...
     g25 = app_commands.Group(name="g25", description="Commands for G25 genetic analysis.")
 
     @g25.command(name='addcoords', description='Save your G25 coordinates to the bot for easy use.')
@@ -453,15 +478,15 @@ class G25Commands(commands.Cog, name="G25"):
     )
     @app_commands.autocomplete(target_sample=single_sample_autocomplete, source_model=model_autocomplete, source_saved_samples=multi_sample_autocomplete)
     async def model(self, interaction: discord.Interaction, 
-                         target_sample: Optional[str] = None,
-                         target_population_name: Optional[str] = None,
-                         target_g25_string: Optional[str] = None,
-                         target_attachment: Optional[discord.Attachment] = None,
-                         source_model: Optional[str] = None, 
-                         source_populations: Optional[str] = None,
-                         source_saved_samples: Optional[str] = None,
-                         source_custom_string: Optional[str] = None,
-                         source_custom_file: Optional[discord.Attachment] = None):
+                          target_sample: Optional[str] = None,
+                          target_population_name: Optional[str] = None,
+                          target_g25_string: Optional[str] = None,
+                          target_attachment: Optional[discord.Attachment] = None,
+                          source_model: Optional[str] = None, 
+                          source_populations: Optional[str] = None,
+                          source_saved_samples: Optional[str] = None,
+                          source_custom_string: Optional[str] = None,
+                          source_custom_file: Optional[discord.Attachment] = None):
         await interaction.response.defer()
 
         # --- Get Target Sample ---
@@ -617,10 +642,10 @@ class G25Commands(commands.Cog, name="G25"):
     )
     @app_commands.autocomplete(target_saved_sample=single_sample_autocomplete)
     async def g25_leaderboard(self, interaction: discord.Interaction, 
-                              target_saved_sample: Optional[str] = None,
-                              target_population_name: Optional[str] = None, 
-                              custom_target_string: Optional[str] = None, 
-                              custom_target_file: Optional[discord.Attachment] = None):
+                                  target_saved_sample: Optional[str] = None,
+                                  target_population_name: Optional[str] = None, 
+                                  custom_target_string: Optional[str] = None, 
+                                  custom_target_file: Optional[discord.Attachment] = None):
         await interaction.response.defer()
 
         target_coords = None
@@ -697,11 +722,11 @@ class G25Commands(commands.Cog, name="G25"):
     )
     @app_commands.autocomplete(target_samples=multi_sample_autocomplete)
     async def plot(self, interaction: discord.Interaction, 
-                   plot_type: Literal['Simple (Image)', 'Advanced (Interactive Link)'],
-                   target_samples: Optional[str] = None, 
-                   background_populations: Optional[str] = None,
-                   custom_samples_string: Optional[str] = None,
-                   custom_samples_file: Optional[discord.Attachment] = None):
+                       plot_type: Literal['Simple (Image)', 'Advanced (Interactive Link)'],
+                       target_samples: Optional[str] = None, 
+                       background_populations: Optional[str] = None,
+                       custom_samples_string: Optional[str] = None,
+                       custom_samples_file: Optional[discord.Attachment] = None):
         await interaction.response.defer()
 
         if self.g25_data is None:
