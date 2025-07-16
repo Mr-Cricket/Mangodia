@@ -117,58 +117,32 @@ class G25Commands(commands.Cog, name="G25"):
 
     async def multi_sample_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         """
-        Provides autocomplete for multiple, comma-separated sample names.
-        This version uses a simplified, more robust parsing logic that does not automatically add a trailing comma,
-        making it more resilient to Discord client inconsistencies.
+        Provides autocomplete for the LAST sample name in a comma-separated list.
+        NOTE: Selecting a choice will REPLACE the entire input field with that choice.
+        This function serves as a simple "search and replace" tool to find correct sample names.
         """
         if not self.db_pool:
             return []
 
-        # 1. Cleanly parse the input. Filter out any empty items that result from extra commas.
-        parts = [p.strip() for p in current.split(',') if p.strip()]
+        # 1. We only care about the text after the last comma. This is the active search term.
+        try:
+            active_search_term = current.split(',')[-1].strip()
+        except IndexError:
+            active_search_term = ""
 
-        # 2. Determine what the user is currently typing.
-        # If the input string is empty or ends with a comma, the user is starting a new search.
-        # Otherwise, the last item in our `parts` list is the active search term.
-        last_part_is_active_search = current and not current.endswith(',')
-        
-        active_search_term = ""
-        already_selected = []
-
-        if last_part_is_active_search:
-            active_search_term = parts[-1]
-            already_selected = parts[:-1]
-        else:
-            # User is starting a new term, so all parsed parts are considered "selected".
-            already_selected = parts
-
+        # 2. Find all samples that match what the user is currently typing.
         choices = []
         async with self.db_pool.acquire() as conn:
-            # 3. Fetch all potential matches from the database for the active search term.
             query = "SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2"
             records = await conn.fetch(query, interaction.user.id, f'%{active_search_term}%')
 
             for record in records:
                 sample_name = record['sample_name']
+                # 3. The value is just the sample name. This will replace the whole field.
+                #    This is a simpler, more reliable approach than trying to build the full string.
+                if len(sample_name) <= 100:
+                    choices.append(app_commands.Choice(name=sample_name, value=sample_name))
 
-                # 4. Manually filter out any suggestions that are already in the selected list.
-                #    This is more reliable than complex SQL and makes the logic clearer.
-                if sample_name in already_selected:
-                    continue
-
-                # 5. Construct the new value. It's simply the list of old items plus the new one.
-                #    We DO NOT add a trailing comma here. The user will type the next comma themselves.
-                #    This is the key change that makes the process more robust.
-                new_parts = already_selected + [sample_name]
-                new_value = ', '.join(new_parts)
-
-                # 6. Add the choice if it fits within Discord's limits.
-                if len(new_value) <= 100:
-                    choices.append(app_commands.Choice(name=sample_name, value=new_value))
-                else:
-                    # Stop if the next choice would be too long.
-                    break
-        
         return choices[:25]
 
     async def model_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
