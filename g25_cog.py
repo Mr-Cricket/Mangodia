@@ -124,20 +124,21 @@ class G25Commands(commands.Cog, name="G25"):
             records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2", interaction.user.id, f'%{last_part}%')
         
         choices = []
-        prefix = ','.join(parts[:-1])
+        
+        if len(parts) > 1:
+            prefix = ','.join(parts[:-1]) + ', '
+        else:
+            prefix = ''
+            
+        existing_samples = [p.strip() for p in current.split(',')]
         
         for r in records:
             sample_name = r['sample_name']
+            if sample_name in existing_samples:
+                continue
+                
+            new_value = prefix + sample_name + ", "
             
-            if prefix:
-                new_value = f"{prefix.strip()}, {sample_name}"
-            else:
-                new_value = sample_name
-            
-            # Add a trailing comma and space if there's room, to make adding the next item easier
-            if len(new_value) < 98:
-                new_value += ", "
-
             if len(new_value) <= 100:
                 choices.append(app_commands.Choice(name=sample_name, value=new_value))
         
@@ -414,9 +415,9 @@ class G25Commands(commands.Cog, name="G25"):
         embed_b = discord.Embed(description=desc_b + body_b, color=0x2B2D31)
         await interaction.followup.send(embed=embed_b)
 
-    @g25.command(name='save_model', description='Saves a list of populations as a reusable model.')
+    @g25.command(name='save_source_model', description='Saves a list of populations as a reusable model.')
     @app_commands.describe(model_name="A short name for your model (e.g., 'BronzeAge').", populations="A comma-separated list of source populations.")
-    async def save_model(self, interaction: discord.Interaction, model_name: str, populations: str):
+    async def save_source_model(self, interaction: discord.Interaction, model_name: str, populations: str):
         await interaction.response.defer(ephemeral=True)
         if not self.db_pool:
             await interaction.followup.send("Database connection is not available.")
