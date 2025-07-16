@@ -117,30 +117,33 @@ class G25Commands(commands.Cog, name="G25"):
         if not self.db_pool:
             return []
         
-        parts = current.split(',')
-        last_part = parts[-1].strip()
+        parts = [p.strip() for p in current.split(',')]
         
-        async with self.db_pool.acquire() as conn:
-            records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2", interaction.user.id, f'%{last_part}%')
-        
-        choices = []
-        
-        if len(parts) > 1:
-            prefix = ','.join(parts[:-1]) + ', '
+        if current.endswith(','):
+            already_selected = [p for p in parts if p]
+            last_part = ''
         else:
-            prefix = ''
-            
-        existing_samples = [p.strip() for p in current.split(',')]
-        
-        for r in records:
-            sample_name = r['sample_name']
-            if sample_name in existing_samples:
-                continue
+            already_selected = [p for p in parts[:-1] if p]
+            last_part = parts[-1]
+
+        choices = []
+        async with self.db_pool.acquire() as conn:
+            query = "SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2"
+            records = await conn.fetch(query, interaction.user.id, f'%{last_part}%')
+
+            for record in records:
+                sample_name = record['sample_name']
                 
-            new_value = prefix + sample_name + ", "
-            
-            if len(new_value) <= 100:
-                choices.append(app_commands.Choice(name=sample_name, value=new_value))
+                if sample_name in already_selected:
+                    continue
+
+                new_parts = already_selected + [sample_name]
+                new_value = ', '.join(new_parts) + ', '
+                
+                if len(new_value) <= 100:
+                    choices.append(app_commands.Choice(name=sample_name, value=new_value))
+                else:
+                    break
         
         return choices[:25]
 
