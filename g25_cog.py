@@ -115,36 +115,6 @@ class G25Commands(commands.Cog, name="G25"):
             records = await conn.fetch("SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2", interaction.user.id, f'%{current}%')
         return [app_commands.Choice(name=r['sample_name'], value=r['sample_name']) for r in records][:25]
 
-    async def multi_sample_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
-        """
-        Provides autocomplete for the LAST sample name in a comma-separated list.
-        NOTE: Selecting a choice will REPLACE the entire input field with that choice.
-        This function serves as a simple "search and replace" tool to find correct sample names.
-        """
-        if not self.db_pool:
-            return []
-
-        # 1. We only care about the text after the last comma. This is the active search term.
-        try:
-            active_search_term = current.split(',')[-1].strip()
-        except IndexError:
-            active_search_term = ""
-
-        # 2. Find all samples that match what the user is currently typing.
-        choices = []
-        async with self.db_pool.acquire() as conn:
-            query = "SELECT sample_name FROM g25_user_coordinates WHERE user_id = $1 AND sample_name ILIKE $2"
-            records = await conn.fetch(query, interaction.user.id, f'%{active_search_term}%')
-
-            for record in records:
-                sample_name = record['sample_name']
-                # 3. The value is just the sample name. This will replace the whole field.
-                #    This is a simpler, more reliable approach than trying to build the full string.
-                if len(sample_name) <= 100:
-                    choices.append(app_commands.Choice(name=sample_name, value=sample_name))
-
-        return choices[:25]
-
     async def model_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         if not self.db_pool:
             return []
@@ -450,7 +420,7 @@ class G25Commands(commands.Cog, name="G25"):
         source_custom_string="[Source] Custom source populations as a block of text.",
         source_custom_file="[Source] A .txt or .csv file with custom source populations."
     )
-    @app_commands.autocomplete(target_sample=single_sample_autocomplete, source_model=model_autocomplete, source_saved_samples=multi_sample_autocomplete)
+    @app_commands.autocomplete(target_sample=single_sample_autocomplete, source_model=model_autocomplete)
     async def model(self, interaction: discord.Interaction, 
                           target_sample: Optional[str] = None,
                           target_population_name: Optional[str] = None,
@@ -694,7 +664,6 @@ class G25Commands(commands.Cog, name="G25"):
         custom_samples_string="[Optional] Custom samples as a block of text to plot in cyan.",
         custom_samples_file="[Optional] A .txt or .csv file with custom samples to plot in cyan."
     )
-    @app_commands.autocomplete(target_samples=multi_sample_autocomplete)
     async def plot(self, interaction: discord.Interaction, 
                        plot_type: Literal['Simple (Image)', 'Advanced (Interactive Link)'],
                        target_samples: Optional[str] = None, 
